@@ -4,8 +4,8 @@
     <name>deepseek-harness-for-intellij</name>
     <vendor>moshang-ca</vendor>
     <description><![CDATA[
-        <p><b>deepseek-harness-for-intellij</b> is a repository that provides a pure template to make it easier to create a new plugin project.</p>
-        <p>The main goal of this template is to speed up the setup phase of plugin development for both new and experienced developers by preconfiguring the project scaffold and CI, linking to the proper documentation pages, and keeping everything organized.</p>
+        <p><b>deepseek-harness-for-intellij</b> integrates <a href="https://github.com/deepseek-ai/deepseek-harness">DeepSeek Harness</a> (dsh) into the IDE through the Agent Client Protocol (ACP), the same integration approach used by IntelliJ AI Assistant.</p>
+        <p>It provides a chat tool window that talks to a locally started dsh ACP server, streams assistant replies, and manages the dsh process lifecycle.</p>
     ]]></description>
 
     <depends>com.intellij.modules.platform</depends>
@@ -13,7 +13,11 @@
     <resource-bundle>messages.MyBundle</resource-bundle>
 
     <extensions defaultExtensionNs="com.intellij">
-        <toolWindow factoryClass="com.github.moshangca.deepseekharnessforintellij.toolWindow.MyToolWindowFactory" id="MyToolWindow"/>
-        <postStartupActivity implementation="com.github.moshangca.deepseekharnessforintellij.startup.MyProjectActivity" />
+        <toolWindow factoryClass="com.github.moshangca.deepseekharnessforintellij.ui.ChatToolWindowFactory"
+                    id="deepseek-harness-chat"
+                    anchor="right"
+                    icon="/icons/dsh.svg"/>
+        <applicationConfigurable parentId="tools"
+                                 instance="com.github.moshangca.deepseekharnessforintellij.settings.DshSettingsConfigurable"/>
     </extensions>
 </idea-plugin>
