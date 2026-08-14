@@ -12,6 +12,10 @@ java {
     }
 }
 
+tasks.withType<JavaCompile>().configureEach {
+    options.encoding = "UTF-8"
+}
+
 dependencies {
     testImplementation("junit:junit:4.13.2")
 

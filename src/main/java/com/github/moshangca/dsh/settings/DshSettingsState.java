@@ -1,11 +1,11 @@
-package com.github.moshangca.deepseekharnessforintellij.settings;
+package com.github.moshangca.dsh.settings;
 
 import com.intellij.openapi.application.ApplicationManager;
 import com.intellij.openapi.components.PersistentStateComponent;
 import com.intellij.openapi.components.Service;
 import com.intellij.openapi.components.State;
 import com.intellij.openapi.components.Storage;
-import com.github.moshangca.deepseekharnessforintellij.dsh.DshConfig;
+import com.github.moshangca.dsh.dsh.DshConfig;
 import org.jetbrains.annotations.NotNull;
 import org.jetbrains.annotations.Nullable;
 

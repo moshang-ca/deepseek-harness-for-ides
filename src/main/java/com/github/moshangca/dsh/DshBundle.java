@@ -1,4 +1,4 @@
-package com.github.moshangca.deepseekharnessforintellij;
+package com.github.moshangca.dsh;
 
 import com.intellij.DynamicBundle;
 import org.jetbrains.annotations.Nls;
@@ -6,13 +6,13 @@ import org.jetbrains.annotations.NonNls;
 import org.jetbrains.annotations.PropertyKey;
 
 @NonNls
-public final class MyBundle extends DynamicBundle {
+public final class DshBundle extends DynamicBundle {
 
-    public static final String BUNDLE = "messages.MyBundle";
+    public static final String BUNDLE = "messages.DshBundle";
 
-    private static final MyBundle INSTANCE = new MyBundle();
+    private static final DshBundle INSTANCE = new DshBundle();
 
-    private MyBundle() {
+    private DshBundle() {
         super(BUNDLE);
     }
 

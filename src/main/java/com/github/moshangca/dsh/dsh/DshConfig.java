@@ -1,4 +1,4 @@
-package com.github.moshangca.deepseekharnessforintellij.dsh;
+package com.github.moshangca.dsh.dsh;
 
 /**
  * Configuration for the dsh web server that the plugin launches.
@@ -29,8 +29,6 @@ public final class DshConfig {
     public static final String SANDBOX_MODE_FULL = "danger-full-access";
 
     public static final String DSH_PERMISSION_MODE_ENV = "DSH_PERMISSION_MODE";
-
-    public static final String DEEPSEEK_API_KEY_ENV = "DEEPSEEK_API_KEY";
 
     public static final int DEFAULT_PORT = 3080;
 
