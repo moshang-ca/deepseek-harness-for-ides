@@ -1,4 +1,4 @@
-package org.jetbrains.plugins.template.startup
+package com.github.moshangca.deepseekharnessforintellij.startup
 
 import com.intellij.openapi.diagnostic.thisLogger
 import com.intellij.openapi.project.Project
