@@ -1,7 +1,11 @@
 package com.github.moshangca.deepseekharnessforintellij.dsh;
 
 import com.intellij.execution.configurations.GeneralCommandLine;
+import com.intellij.execution.process.OSProcessHandler;
+import com.intellij.execution.process.ProcessEvent;
+import com.intellij.execution.process.ProcessListener;
 import com.intellij.openapi.diagnostic.Logger;
+import com.intellij.openapi.util.Key;
 import org.jetbrains.annotations.NotNull;
 import org.jetbrains.annotations.Nullable;
 
@@ -10,6 +14,9 @@ import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.function.BooleanSupplier;
+import java.util.function.Consumer;
 
 /**
  * Manages the lifecycle of the dsh web server child process.
@@ -33,7 +40,8 @@ public final class DshProcessManager {
     }
 
     private final Path workDir;
-    private final int port;
+    private final int basePort;
+    private int actualPort;
     private final Path nodeExe;
     private final Path npmCmd;
 
@@ -46,7 +54,8 @@ public final class DshProcessManager {
      */
     public DshProcessManager(@NotNull Path workDir, int port) {
         this.workDir = workDir;
-        this.port = port;
+        this.basePort = port;
+        this.actualPort = port;
         this.nodeExe = findExecutable("node");
         this.npmCmd = findNpm();
     }
@@ -68,24 +77,34 @@ public final class DshProcessManager {
      * @return true on success
      */
     public boolean prepare() {
+        return prepare(null, null);
+    }
+
+    /**
+     * {@link #prepare()} with live npm install output.
+     *
+     * @param progress    receives each npm output line as it is produced (maybe null)
+     * @param cancelCheck polled while npm runs; returning true aborts the install
+     *                    and destroys the npm process (maybe null)
+     * @return true on success
+     */
+    public boolean prepare(@Nullable Consumer<String> progress, @Nullable BooleanSupplier cancelCheck) {
         try {
             Files.createDirectories(workDir);
             if (isInstalled()) {
                 return true;
             }
-            return npmInstall();
+            return npmInstall(progress, cancelCheck);
         } catch (IOException e) {
             LOG.warn("failed to prepare dsh work directory " + workDir, e);
             return false;
         }
     }
 
-    /** Whether the expected dsh bin is present in the work directory. */
     public boolean isInstalled() {
         return Files.exists(dshBin());
     }
 
-    /** The resolved dsh bin path in the work directory. */
     private @NotNull Path dshBin() {
         return workDir.resolve("node_modules/@deepseek-ai/dsh/lib/bin.js");
     }
@@ -93,16 +112,17 @@ public final class DshProcessManager {
     /**
      * Start the dsh web server process.
      *
-     * @param provider    the configured provider route (informational; dsh reads
-     *                    model/provider from its own config, env, or defaults)
-     * @param model       the configured model (informational)
+     * <p>The provider/model selection and the API key are not applied here:
+     * dsh reads its own defaults at boot, the plugin switches the model per
+     * session through the {@code session.selectModel} RPC, and the API key is
+     * injected through the credentials service (see {@code DshApiClient}) so
+     * it is not shadowed by a launch-time environment variable.</p>
+     *
      * @param sandboxMode one of {@link DshConfig#SANDBOX_MODE_WORKSPACE} or
      *                    {@link DshConfig#SANDBOX_MODE_FULL}
-     * @param apiKey      the DEEPSEEK_API_KEY, or null to inherit the ambient environment
      * @return the started process, or null on failure
      */
-    public @Nullable Process start(@NotNull String provider, @NotNull String model,
-                                   @NotNull String sandboxMode, @Nullable String apiKey) {
+    public @Nullable Process start(@NotNull String sandboxMode) {
         if (process != null) {
             LOG.warn("dsh process already running");
             return process;
@@ -118,27 +138,21 @@ public final class DshProcessManager {
                 return null;
             }
 
+            actualPort = choosePort();
             GeneralCommandLine commandLine = new GeneralCommandLine()
                     .withExePath(nodeExe.toString())
-                    .withParameters(bin.toString(), "web", "--port", String.valueOf(port))
+                    .withParameters(bin.toString(), "web", "--port", String.valueOf(actualPort))
                     .withWorkDirectory(workDir.toFile())
                     .withCharset(StandardCharsets.UTF_8);
-            // The web profile reads these at boot. sandbox mode via
-            // DSH_PERMISSION_MODE; API key via DEEPSEEK_API_KEY. Git Bash dirs
-            // are injected so the harness can spawn `bash -c ...`.
             commandLine.getEnvironment().put(DshConfig.DSH_PERMISSION_MODE_ENV, sandboxMode);
             String path = System.getenv("PATH");
             if (path != null) {
                 commandLine.getEnvironment().put("PATH", augmentPathForBash(path));
             }
-            if (apiKey != null && !apiKey.isBlank()) {
-                commandLine.getEnvironment().put(DshConfig.DEEPSEEK_API_KEY_ENV, apiKey);
-            }
 
             Process child = commandLine.createProcess();
             process = child;
 
-            // Drain both streams so the child never blocks writing diagnostics.
             drain(child.getInputStream(), "stdout");
             drain(child.getErrorStream(), "stderr");
 
@@ -157,7 +171,7 @@ public final class DshProcessManager {
             waiter.setDaemon(true);
             waiter.start();
 
-            LOG.info("dsh web server starting (pid=" + child.pid() + ", port=" + port + ")");
+            LOG.info("dsh web server starting (pid=" + child.pid() + ", port=" + actualPort + ")");
             return child;
         } catch (Exception e) {
             LOG.error("failed to start dsh web server", e);
@@ -166,7 +180,24 @@ public final class DshProcessManager {
     }
 
     public int getPort() {
-        return port;
+        return actualPort;
+    }
+
+    private int choosePort() {
+        for (int candidate = basePort; candidate < basePort + 20; candidate++) {
+            if (isPortFree(candidate)) return candidate;
+        }
+        LOG.warn("no free port in [" + basePort + ", " + (basePort + 20) + "); falling back to " + basePort);
+        return basePort;
+    }
+
+    private static boolean isPortFree(int port) {
+        try (java.net.ServerSocket socket =
+                     new java.net.ServerSocket(port, 1, java.net.InetAddress.getLoopbackAddress())) {
+            return true;
+        } catch (java.io.IOException e) {
+            return false;
+        }
     }
 
     /**
@@ -182,10 +213,15 @@ public final class DshProcessManager {
             Process current = process;
             if (current == null || !current.isAlive()) return false;
             try {
-                java.net.http.HttpClient client = java.net.http.HttpClient.newHttpClient();
+                // HTTP/1.1 forced: node:http closes connections that ask for an
+                // h2c upgrade, which the default HTTP/2-capable client sends.
+                java.net.http.HttpClient client = java.net.http.HttpClient.newBuilder()
+                        .version(java.net.http.HttpClient.Version.HTTP_1_1)
+                        .connectTimeout(java.time.Duration.ofSeconds(3))
+                        .build();
                 String body = "{\"type\":\"client-request\",\"rpcId\":\"ready\",\"method\":\"host.describe\",\"payload\":{}}";
                 java.net.http.HttpRequest req = java.net.http.HttpRequest.newBuilder()
-                        .uri(java.net.URI.create("http://127.0.0.1:" + port + "/api/host.describe"))
+                        .uri(java.net.URI.create("http://127.0.0.1:" + actualPort + "/api/host.describe"))
                         .timeout(java.time.Duration.ofSeconds(3))
                         .header("Content-Type", "application/json")
                         .POST(java.net.http.HttpRequest.BodyPublishers.ofString(body))
@@ -250,8 +286,13 @@ public final class DshProcessManager {
         t.start();
     }
 
-    private boolean npmInstall() {
+    private boolean npmInstall(@Nullable Consumer<String> progress, @Nullable BooleanSupplier cancelCheck) {
+        Path lockFile = workDir.resolve(".dsh-install.lock");
         try {
+            if (!acquireInstallLock(lockFile)) {
+                LOG.error("another dsh install is still in progress; giving up");
+                return false;
+            }
             Path nodeModules = workDir.resolve("node_modules");
             if (Files.exists(nodeModules)) {
                 deleteRecursively(nodeModules);
@@ -261,24 +302,84 @@ public final class DshProcessManager {
 
             GeneralCommandLine commandLine = new GeneralCommandLine()
                     .withExePath(npmCmd.toString())
-                    .withParameters("install", "--no-audit", "--no-fund", "--loglevel=error",
+                    .withParameters("install", "--no-audit", "--no-fund", "--loglevel=notice",
                             "--no-save", "--prefix", workDir.toString())
                     .withParameters(DshConfig.NPM_PACKAGES)
                     .withWorkDirectory(workDir.toFile())
                     .withCharset(StandardCharsets.UTF_8);
-            com.intellij.execution.process.CapturingProcessHandler handler =
-                    new com.intellij.execution.process.CapturingProcessHandler(commandLine);
-            com.intellij.execution.process.ProcessOutput output = handler.runProcess(600_000);
-            if (output.getExitCode() != 0) {
-                LOG.error("npm install of dsh failed with exit code " + output.getExitCode()
-                        + "\n" + output.getStderr());
+
+            OSProcessHandler handler = new OSProcessHandler(commandLine);
+            AtomicBoolean aborted = new AtomicBoolean(false);
+            handler.addProcessListener(new ProcessListener() {
+                @Override
+                public void onTextAvailable(@NotNull ProcessEvent event, @NotNull Key outputType) {
+                    String text = event.getText();
+                    if (text != null && !text.isBlank()) {
+                        String line = text.stripTrailing();
+                        LOG.info("[dsh npm] " + line);
+                        if (progress != null) progress.accept(line);
+                    }
+                    if (cancelCheck != null && cancelCheck.getAsBoolean()) {
+                        aborted.set(true);
+                        handler.destroyProcess();
+                    }
+                }
+            });
+            handler.startNotify();
+            boolean exited = handler.getProcess().waitFor(600, TimeUnit.SECONDS);
+            if (!exited) {
+                handler.destroyProcess();
+                LOG.error("npm install of dsh timed out");
+                return false;
+            }
+            if (aborted.get()) {
+                LOG.info("npm install of dsh cancelled");
+                return false;
+            }
+            int exitCode = handler.getProcess().exitValue();
+            if (exitCode != 0) {
+                LOG.error("npm install of dsh failed with exit code " + exitCode);
                 return false;
             }
             return isInstalled();
         } catch (Exception e) {
             LOG.error("npm install of dsh failed", e);
             return false;
+        } finally {
+            try {
+                Files.deleteIfExists(lockFile);
+            } catch (IOException ignored) {
+            }
         }
+    }
+
+    /**
+     * Take the install lock, waiting for a concurrent install by another IDE to
+     * finish. A lock older than 10 minutes is treated as stale (a crashed IDE)
+     * and broken.
+     *
+     * @return true when the lock is held by this caller
+     */
+    private boolean acquireInstallLock(@NotNull Path lockFile) throws IOException, InterruptedException {
+        long deadline = System.currentTimeMillis() + TimeUnit.MINUTES.toMillis(2);
+        while (Files.exists(lockFile) && System.currentTimeMillis() < deadline) {
+            try {
+                long age = System.currentTimeMillis() - Files.getLastModifiedTime(lockFile).toMillis();
+                if (age > TimeUnit.MINUTES.toMillis(10)) {
+                    LOG.warn("breaking stale dsh install lock " + lockFile);
+                    Files.deleteIfExists(lockFile);
+                    break;
+                }
+            } catch (IOException e) {
+                LOG.warn("cannot stat dsh install lock " + lockFile, e);
+            }
+            Thread.sleep(500);
+        }
+        if (Files.exists(lockFile)) {
+            return false;
+        }
+        Files.createFile(lockFile);
+        return true;
     }
 
     private static void deleteRecursively(@NotNull Path dir) throws IOException {

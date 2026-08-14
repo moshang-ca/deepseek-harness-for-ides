@@ -4,13 +4,13 @@
     <name>deepseek-harness-for-intellij</name>
     <vendor>moshang-ca</vendor>
     <description><![CDATA[
-        <p><b>deepseek-harness-for-intellij</b> integrates <a href="https://github.com/deepseek-ai/deepseek-harness">DeepSeek Harness</a> (dsh) into the IDE through the Agent Client Protocol (ACP), the same integration approach used by IntelliJ AI Assistant.</p>
-        <p>It provides a chat tool window that talks to a locally started dsh ACP server, streams assistant replies, and manages the dsh process lifecycle.</p>
+        <p><b>deepseek-harness-for-intellij</b> integrates <a href="https://github.com/deepseek-ai/deepseek-harness">DeepSeek Harness</a> (dsh) into the IDE as a chat tool window. It runs the dsh web-profile server locally and speaks its HTTP API (unary RPC + a mux event stream).</p>
+        <p>The tool window streams assistant replies with collapsible reasoning, renders tool-call cards and approval prompts, answers interactive questions, and lets you switch models and sandbox mode without leaving the IDE.</p>
     ]]></description>
 
     <depends>com.intellij.modules.platform</depends>
 
-    <resource-bundle>messages.MyBundle</resource-bundle>
+    <resource-bundle>messages.DshBundle</resource-bundle>
 
     <extensions defaultExtensionNs="com.intellij">
         <toolWindow factoryClass="com.github.moshangca.deepseekharnessforintellij.ui.ChatToolWindowFactory"

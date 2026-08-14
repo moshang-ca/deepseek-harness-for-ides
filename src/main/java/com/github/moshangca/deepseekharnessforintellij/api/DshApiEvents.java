@@ -1,5 +1,7 @@
 package com.github.moshangca.deepseekharnessforintellij.api;
 
+import com.google.gson.JsonArray;
+import com.google.gson.JsonElement;
 import com.google.gson.JsonObject;
 import com.google.gson.JsonParser;
 import com.intellij.openapi.diagnostic.Logger;
@@ -45,6 +47,7 @@ public final class DshApiEvents {
         this.wsUrl = base.replaceFirst("^http", "ws") + "/api/events.mux";
         this.http = HttpClient.newBuilder()
                 .connectTimeout(Duration.ofSeconds(10))
+                .version(HttpClient.Version.HTTP_1_1)
                 .build();
         this.listener = listener;
     }
@@ -102,7 +105,6 @@ public final class DshApiEvents {
         return opened;
     }
 
-    /** Close the mux connection. */
     public void close() {
         closed.set(true);
         WebSocket ws = socket;
@@ -117,9 +119,6 @@ public final class DshApiEvents {
 
     private void handleLine(@NotNull String line) {
         JsonObject message = JsonParser.parseString(line).getAsJsonObject();
-        // All mux frames are server-requests (type=server-request); the payload
-        // is a discriminated union on payload.type. The envelope's rpcId is used
-        // to answer answerable frames (approval).
         String rpcId = message.has("rpcId") ? message.get("rpcId").getAsString() : "";
         JsonObject payload = message.has("payload") && message.get("payload").isJsonObject()
                 ? message.getAsJsonObject("payload") : new JsonObject();
@@ -140,11 +139,39 @@ public final class DshApiEvents {
                 String callId = payload.has("callId") ? payload.get("callId").getAsString() : null;
                 listener.onApprovalRequested(sessionId, rpcId, approvalId, toolName, callId);
             }
-            default -> {
-                // session/subscribed, session/queue, session/projection,
-                // approval/resolved, stream/error: informational, ignored for now.
-                LOG.debug("mux frame type=" + type + " session=" + sessionId);
+            case "approval/resolved" -> {
+                String approvalId = payload.has("approvalId") ? payload.get("approvalId").getAsString() : "";
+                String outcome = payload.has("outcome") ? payload.get("outcome").getAsString() : "";
+                listener.onApprovalResolved(sessionId, approvalId, outcome);
             }
+            case "question/requested" -> {
+                JsonArray questions = payload.has("questions") && payload.get("questions").isJsonArray()
+                        ? payload.getAsJsonArray("questions") : new JsonArray();
+                listener.onQuestionRequested(sessionId, rpcId, questions);
+            }
+            case "stream/error" -> {
+                String errorMessage = "stream error";
+                if (payload.has("error") && payload.get("error").isJsonObject()
+                        && payload.getAsJsonObject("error").has("message")) {
+                    errorMessage = payload.getAsJsonObject("error").get("message").getAsString();
+                }
+                listener.onStreamError(errorMessage);
+            }
+            case "session/queue" -> {
+                int queued = 0;
+                int steering = 0;
+                if (payload.has("items") && payload.get("items").isJsonArray()) {
+                    for (JsonElement item : payload.getAsJsonArray("items")) {
+                        JsonObject obj = item.isJsonObject() ? item.getAsJsonObject() : null;
+                        if (obj == null) continue;
+                        String placement = obj.has("placement") ? obj.get("placement").getAsString() : "";
+                        if ("queued".equals(placement)) queued++;
+                        else if ("steering".equals(placement)) steering++;
+                    }
+                }
+                listener.onQueueChanged(sessionId, queued, steering);
+            }
+            default -> LOG.debug("mux frame type=" + type + " session=" + sessionId);
         }
     }
 }

@@ -30,8 +30,6 @@ public final class DshConfig {
 
     public static final String DSH_PERMISSION_MODE_ENV = "DSH_PERMISSION_MODE";
 
-    public static final String DEEPSEEK_API_KEY_ENV = "DEEPSEEK_API_KEY";
-
     public static final int DEFAULT_PORT = 3080;
 
     public static final String DSH_PACKAGE = "@deepseek-ai/dsh@" + NPM_DIST_TAG;

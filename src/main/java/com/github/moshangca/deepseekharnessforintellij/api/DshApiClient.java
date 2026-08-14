@@ -1,6 +1,7 @@
 package com.github.moshangca.deepseekharnessforintellij.api;
 
 import com.google.gson.Gson;
+import com.google.gson.JsonArray;
 import com.google.gson.JsonElement;
 import com.google.gson.JsonObject;
 import com.google.gson.JsonParser;
@@ -8,7 +9,6 @@ import com.intellij.openapi.diagnostic.Logger;
 import org.jetbrains.annotations.NotNull;
 import org.jetbrains.annotations.Nullable;
 
-import java.io.IOException;
 import java.net.URI;
 import java.net.http.HttpClient;
 import java.net.http.HttpRequest;
@@ -17,7 +17,6 @@ import java.time.Duration;
 import java.util.Map;
 import java.util.UUID;
 import java.util.concurrent.CompletableFuture;
-import java.util.concurrent.CompletionException;
 
 /**
  * Minimal client for the dsh web API RPC layer.
@@ -41,8 +40,12 @@ public final class DshApiClient {
 
     public DshApiClient(@NotNull String baseUrl) {
         this.baseUrl = baseUrl.endsWith("/") ? baseUrl.substring(0, baseUrl.length() - 1) : baseUrl;
+        // Force HTTP/1.1: the dsh web server is a plain node:http HTTP/1.1
+        // server that closes connections requesting an h2c upgrade, which the
+        // default HTTP/2 client sends for http:// URLs.
         this.http = HttpClient.newBuilder()
                 .connectTimeout(Duration.ofSeconds(10))
+                .version(HttpClient.Version.HTTP_1_1)
                 .build();
     }
 
@@ -50,7 +53,7 @@ public final class DshApiClient {
      * Call one unary RPC method.
      *
      * @param method  the wire method path, e.g. {@code session.prompt}
-     * @param payload the request payload map (may be empty)
+     * @param payload the request payload map (maybe empty)
      * @return a future resolving to the RPC result object (the {@code value} of {@code result})
      * @throws ApiRpcException when the call returns a non-ok result
      */
@@ -95,18 +98,15 @@ public final class DshApiClient {
                 });
     }
 
-    /** Convenience: describe the host. */
     public @NotNull CompletableFuture<JsonObject> describe() {
         return call("host.describe", Map.of());
     }
 
-    /** Create a new session. */
     public @NotNull CompletableFuture<JsonObject> createSession(@Nullable String cwd) {
         Map<String, Object> payload = cwd == null ? Map.of() : Map.of("cwd", cwd);
         return call("session.create", payload);
     }
 
-    /** Send a user prompt to a session. */
     public @NotNull CompletableFuture<JsonObject> prompt(@NotNull String sessionId, @NotNull String text) {
         return call("session.prompt", Map.of(
                 "sessionId", sessionId,
@@ -114,12 +114,45 @@ public final class DshApiClient {
                 "content", java.util.List.of(Map.of("type", "text", "text", text))));
     }
 
-    /** Cancel the active turn of a session. */
     public @NotNull CompletableFuture<JsonObject> cancel(@NotNull String sessionId) {
         return call("session.cancel", Map.of("sessionId", sessionId));
     }
 
-    /** Fetch a window of history events for a session. */
+    /**
+     * Store a credential (e.g. {@code DEEPSEEK_API_KEY}) in the harness
+     * credentials service. This is the runtime path the web Models page uses;
+     * it works even when the server was launched without the value in its
+     * environment, and the stored value survives server restarts.
+     */
+    public @NotNull CompletableFuture<JsonObject> setCredential(@NotNull String ref, @NotNull String value) {
+        return call("credentials.set", Map.of("ref", ref, "value", value));
+    }
+
+    /**
+     * Inspect a credential's state ({@code credentials.describe}). The
+     * response carries {@code credentials.<ref>.writable}; false means the
+     * value is supplied read-only by the launching environment and any
+     * {@link #setCredential} call would be rejected.
+     */
+    public @NotNull CompletableFuture<JsonObject> describeCredential(@NotNull String ref) {
+        return call("credentials.describe", Map.of("refs", java.util.List.of(ref)));
+    }
+
+    /**
+     * Fetch the model catalog and the session's current selection via
+     * {@code session.models}. The response value carries {@code current}
+     * (provider/model/reasoningEffort) and {@code groups} (the available
+     * providers and their models).
+     */
+    public @NotNull CompletableFuture<JsonObject> models(@NotNull String sessionId) {
+        return call("session.models", Map.of("sessionId", sessionId));
+    }
+
+    public @NotNull CompletableFuture<JsonObject> selectModel(@NotNull String sessionId,
+                                                              @NotNull String provider, @NotNull String model) {
+        return call("session.selectModel", Map.of("sessionId", sessionId, "provider", provider, "model", model));
+    }
+
     public @NotNull CompletableFuture<JsonObject> history(@NotNull String sessionId, @Nullable Integer maxMessages) {
         Map<String, Object> payload = new java.util.LinkedHashMap<>();
         payload.put("sessionId", sessionId);
@@ -140,15 +173,46 @@ public final class DshApiClient {
      */
     public @NotNull CompletableFuture<JsonObject> respondApproval(@NotNull String rpcId, @NotNull String sessionId,
                                                                   @NotNull String approvalId, boolean allow) {
+        return respond(rpcId, Map.of(
+                "ok", true,
+                "value", Map.of(
+                        "sessionId", sessionId,
+                        "approvalId", approvalId,
+                        "outcome", allow ? "allowed-once" : "rejected")));
+    }
+
+    /**
+     * Answer a {@code question/requested} frame with the user's answers.
+     *
+     * @param rpcId    the rpcId from the question/requested frame
+     * @param sessionId the session id from the frame
+     * @param answers  the answer array ({@code id}/{@code selected}/{@code custom})
+     * @return a future completing when the host acknowledges the receipt
+     */
+    public @NotNull CompletableFuture<JsonObject> respondQuestions(@NotNull String rpcId, @NotNull String sessionId,
+                                                                   @NotNull JsonArray answers) {
+        return respond(rpcId, Map.of(
+                "ok", true,
+                "value", Map.of(
+                        "sessionId", sessionId,
+                        "answer", Map.of("answers", answers))));
+    }
+
+    /** Cancel a pending {@code question/requested} (the user dismissed it). */
+    public @NotNull CompletableFuture<JsonObject> cancelQuestion(@NotNull String rpcId) {
+        // The error body must match rpcErrorSchema: code 'cancelled' requires a
+        // details object (may be empty), or the envelope is rejected as bad-response.
+        return respond(rpcId, Map.of(
+                "ok", false,
+                "error", Map.of("code", "cancelled", "message", "question cancelled by user", "details", Map.of())));
+    }
+
+    /** Send one {@code client-response} envelope on {@code POST /api/respond}. */
+    private @NotNull CompletableFuture<JsonObject> respond(@NotNull String rpcId, @NotNull Map<String, Object> result) {
         Map<String, Object> request = Map.of(
                 "type", "client-response",
                 "rpcId", rpcId,
-                "result", Map.of(
-                        "ok", true,
-                        "value", Map.of(
-                                "sessionId", sessionId,
-                                "approvalId", approvalId,
-                                "outcome", allow ? "allowed-once" : "rejected")));
+                "result", result);
         HttpRequest httpRequest = HttpRequest.newBuilder()
                 .uri(URI.create(baseUrl + "/api/respond"))
                 .timeout(Duration.ofSeconds(30))
