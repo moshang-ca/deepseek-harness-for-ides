@@ -150,7 +150,27 @@ public final class DshApiClient {
 
     public @NotNull CompletableFuture<JsonObject> selectModel(@NotNull String sessionId,
                                                               @NotNull String provider, @NotNull String model) {
-        return call("session.selectModel", Map.of("sessionId", sessionId, "provider", provider, "model", model));
+        return selectModel(sessionId, provider, model, null);
+    }
+
+    /**
+     * Select a model, optionally with an explicit reasoning effort.
+     *
+     * @param reasoningEffort one of the model's supported effort ids
+     *                        (e.g. {@code high}, {@code max}), or {@code null} /
+     *                        empty to keep the provider default
+     */
+    public @NotNull CompletableFuture<JsonObject> selectModel(@NotNull String sessionId,
+                                                              @NotNull String provider, @NotNull String model,
+                                                              @Nullable String reasoningEffort) {
+        java.util.Map<String, Object> payload = new java.util.LinkedHashMap<>();
+        payload.put("sessionId", sessionId);
+        payload.put("provider", provider);
+        payload.put("model", model);
+        if (reasoningEffort != null && !reasoningEffort.isEmpty()) {
+            payload.put("reasoningEffort", reasoningEffort);
+        }
+        return call("session.selectModel", payload);
     }
 
     public @NotNull CompletableFuture<JsonObject> history(@NotNull String sessionId, @Nullable Integer maxMessages) {
@@ -158,6 +178,27 @@ public final class DshApiClient {
         payload.put("sessionId", sessionId);
         if (maxMessages != null) payload.put("maxMessages", maxMessages);
         return call("session.history", payload);
+    }
+
+    /**
+     * List all sessions on the server via {@code session.list}. The response
+     * value carries {@code items}, each with {@code sessionId}, {@code updatedAt},
+     * {@code running}, {@code blank}, and optionally {@code projections}
+     * (whose {@code values.title} is the auto-generated title).
+     */
+    public @NotNull CompletableFuture<JsonObject> listSessions() {
+        return call("session.list", Map.of());
+    }
+
+    /**
+     * Rename a session via {@code session.rename}.
+     *
+     * @param sessionId the session to rename
+     * @param title     the new title (host normalizes/truncates)
+     * @return a future resolving to {@code {title, seq}}
+     */
+    public @NotNull CompletableFuture<JsonObject> renameSession(@NotNull String sessionId, @NotNull String title) {
+        return call("session.rename", Map.of("sessionId", sessionId, "title", title));
     }
 
     /**
@@ -200,8 +241,6 @@ public final class DshApiClient {
 
     /** Cancel a pending {@code question/requested} (the user dismissed it). */
     public @NotNull CompletableFuture<JsonObject> cancelQuestion(@NotNull String rpcId) {
-        // The error body must match rpcErrorSchema: code 'cancelled' requires a
-        // details object (may be empty), or the envelope is rejected as bad-response.
         return respond(rpcId, Map.of(
                 "ok", false,
                 "error", Map.of("code", "cancelled", "message", "question cancelled by user", "details", Map.of())));

@@ -38,6 +38,11 @@ public final class ChatMessage {
     private boolean toolRunning;
     private boolean collapsed;
 
+    // Token usage (per assistant message)
+    private long uncachedInputTokens;
+    private long cacheReadTokens;
+    private long outputTokens;
+
     private ChatMessage(Kind kind, String sessionId, @Nullable String initialText) {
         this.kind = kind;
         this.sessionId = sessionId;
@@ -191,5 +196,23 @@ public final class ChatMessage {
 
     public void setCollapsed(boolean collapsed) {
         this.collapsed = collapsed;
+    }
+
+    public long getUncachedInputTokens() {
+        return uncachedInputTokens;
+    }
+
+    public long getCacheReadTokens() {
+        return cacheReadTokens;
+    }
+
+    public long getOutputTokens() {
+        return outputTokens;
+    }
+
+    public void setTokenUsage(long uncachedInputTokens, long cacheReadTokens, long outputTokens) {
+        this.uncachedInputTokens = uncachedInputTokens;
+        this.cacheReadTokens = cacheReadTokens;
+        this.outputTokens = outputTokens;
     }
 }

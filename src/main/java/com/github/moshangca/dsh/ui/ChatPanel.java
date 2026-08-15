@@ -10,6 +10,7 @@ import com.intellij.icons.AllIcons;
 import com.intellij.openapi.application.ApplicationManager;
 import com.intellij.openapi.project.Project;
 import com.intellij.openapi.ui.ComboBox;
+import com.intellij.openapi.util.IconLoader;
 import com.intellij.ui.JBColor;
 import com.intellij.ui.components.JBScrollPane;
 import com.intellij.ui.components.JBTextArea;
@@ -33,6 +34,8 @@ public final class ChatPanel extends JPanel implements DshProjectService.Listene
     private static final Color INPUT_BORDER_NORMAL = new JBColor(0xD5D5D5, 0x4E5054);
     private static final Color INPUT_BORDER_FOCUS = JBColor.namedColor("Focus.color", new JBColor(0x40B6FF, 0x40B6FF));
     private static final String PLACEHOLDER = "Type a message and press Enter...";
+    /** Red square shown on the send button while a turn runs; clicking cancels it. */
+    private static final Icon CANCEL_ICON = IconLoader.getIcon("/icons/cancel.svg", ChatPanel.class);
 
     private final Project project;
     private final DshProjectService service;
@@ -40,16 +43,28 @@ public final class ChatPanel extends JPanel implements DshProjectService.Listene
     private final JPanel messages = new ChatMessagesPanel();
     private final JBScrollPane scroll;
     private final JBTextArea input = new JBTextArea(5, 40);
+    private final JButton sendButton;
     private final JLabel statusDot = new JLabel("●");
     private final JLabel statusLabel = new JLabel(" ");
-    private final JComboBox<String> historyBox;
+    private final JLabel tokenLabel = new JLabel(" ");
+    private final JComboBox<SessionEntry> historyBox;
     private final JComboBox<String> modelBox;
     private final JComboBox<String> sandboxBox;
+    private final JComboBox<EffortOption> effortBox;
 
     private final List<ChatMessage> messageList = new ArrayList<>();
     /** Provider route per model-box item, parallel to the box's items. */
     private final List<String> modelProviders = new ArrayList<>();
+    /** Reasoning effort options per model-box item, parallel to the box's items. */
+    private final List<List<EffortOption>> modelEffortOptions = new ArrayList<>();
+    /** The deployment's default effort per model-box item ("" = none), parallel to the box's items. */
+    private final List<String> modelDefaultEfforts = new ArrayList<>();
     private boolean modelSelectionUpdating;
+    private boolean effortUpdating;
+    /** Whether a turn is running; drives the send/cancel button state. */
+    private boolean turnActive;
+    /** Current session id (may differ from service's if a history switch is pending). */
+    private volatile @Nullable String activeSessionId;
 
     private @Nullable ChatMessage streamingAssistant;
     private @Nullable ChatMessage streamingReasoning;
@@ -72,7 +87,7 @@ public final class ChatPanel extends JPanel implements DshProjectService.Listene
         input.setForeground(UIManager.getColor("Label.disabledForeground"));
 
         InputFrame inputFrame = new InputFrame(JBColor.background(), INPUT_BORDER_FOCUS);
-        inputFrame.setBorder(JBUI.Borders.empty(2, 2));
+        inputFrame.setBorder(JBUI.Borders.empty(2));
         inputFrame.add(input, BorderLayout.CENTER);
         input.addFocusListener(new FocusAdapter() {
             @Override
@@ -94,25 +109,41 @@ public final class ChatPanel extends JPanel implements DshProjectService.Listene
             }
         });
 
-        JButton sendButton = new JButton(AllIcons.Actions.Execute);
+        sendButton = new JButton(AllIcons.Actions.Execute);
         sendButton.setToolTipText("Send");
         sendButton.setPreferredSize(new Dimension(28, 28));
         sendButton.setFocusable(false);
-        sendButton.addActionListener(e -> sendInput());
+        sendButton.setBorder(JBUI.Borders.empty());
+        sendButton.addActionListener(e -> onSendButtonClicked());
         inputFrame.addToBottom(sendButton, BorderLayout.EAST);
 
         // Model dropdown; populated from the harness catalog once connected.
-        modelBox = new JComboBox<>();
+        modelBox = new ComboBox<>();
         modelBox.setPrototypeDisplayValue("deepseek-v4-pro");
         modelBox.addItem(DshSettingsState.getInstance().model);
         modelBox.setToolTipText("Model (applies to the current session)");
         modelBox.addActionListener(e -> onModelChanged());
 
-        // Sandbox mode dropdown (live switch restarts dsh).
-        sandboxBox = new ComboBox<>(new String[]{
-                DshConfig.SANDBOX_MODE_WORKSPACE,
-                DshConfig.SANDBOX_MODE_FULL,
+        effortBox = new ComboBox<>();
+        effortBox.setPrototypeDisplayValue(EffortOption.DEFAULT);
+        effortBox.addItem(EffortOption.DEFAULT);
+        effortBox.setToolTipText("Thinking effort for the current model (applies from the next turn)");
+        effortBox.setFont(effortBox.getFont().deriveFont(11f));
+        effortBox.setRenderer(new DefaultListCellRenderer() {
+            @Override
+            public Component getListCellRendererComponent(JList<?> list, Object value,
+                                                          int index, boolean isSelected, boolean cellHasFocus) {
+                JLabel label = (JLabel) super.getListCellRendererComponent(
+                        list, value, index, isSelected, cellHasFocus);
+                label.setFont(UIManager.getFont("ComboBox.font"));
+                return label;
+            }
         });
+        effortBox.setEnabled(false);
+        effortBox.addActionListener(e -> onEffortChanged());
+
+        // Sandbox mode dropdown (live switch restarts dsh).
+        sandboxBox = new ComboBox<>(DshConfig.SANDBOX_MODES);
         sandboxBox.setPrototypeDisplayValue(DshConfig.SANDBOX_MODE_FULL);
         sandboxBox.setSelectedItem(DshSettingsState.getInstance().sandboxMode);
         sandboxBox.setToolTipText("Sandbox mode (applies on restart)");
@@ -127,6 +158,7 @@ public final class ChatPanel extends JPanel implements DshProjectService.Listene
                 return label;
             }
         });
+        sandboxBox.addActionListener(e -> onSandboxChanged());
         inputFrame.addToBottom(sandboxBox, BorderLayout.WEST);
 
         // Model row: the model selector lives outside the input area.
@@ -140,6 +172,7 @@ public final class ChatPanel extends JPanel implements DshProjectService.Listene
         JPanel left = new JPanel(new FlowLayout(FlowLayout.LEFT, 6, 2));
         left.setOpaque(false);
         left.add(modelBox);
+        left.add(effortBox);
         JPanel right = new JPanel(new FlowLayout(FlowLayout.RIGHT, 6, 2));
         right.setOpaque(false);
         bottomBar.add(left, BorderLayout.WEST);
@@ -161,6 +194,8 @@ public final class ChatPanel extends JPanel implements DshProjectService.Listene
         statusLeft.setOpaque(false);
         statusLeft.add(statusDot);
         statusLeft.add(statusLabel);
+        statusLeft.add(tokenLabel);
+        tokenLabel.setForeground(JBUI.CurrentTheme.Label.foreground(false));
         statusBar.add(statusLeft, BorderLayout.WEST);
 
         JButton newSessionButton = new JButton(AllIcons.General.Add);
@@ -169,9 +204,23 @@ public final class ChatPanel extends JPanel implements DshProjectService.Listene
         newSessionButton.setFocusable(false);
         newSessionButton.addActionListener(e -> newSession());
 
-        historyBox = new JComboBox<>();
-        historyBox.setToolTipText("Session history (coming soon)");
-        historyBox.addItem("session history");
+        historyBox = new ComboBox<>();
+        historyBox.setToolTipText("Session history: switch to a past session");
+        historyBox.setPrototypeDisplayValue(new SessionEntry("00000000", "deepseek-v4-pro"));
+        historyBox.setRenderer(new DefaultListCellRenderer() {
+            @Override
+            public Component getListCellRendererComponent(JList<?> list, Object value,
+                                                          int index, boolean isSelected, boolean cellHasFocus) {
+                JLabel label = (JLabel) super.getListCellRendererComponent(
+                        list, value, index, isSelected, cellHasFocus);
+                if (value instanceof SessionEntry(String sessionId, String title)) {
+                    label.setText(title.isEmpty() ? sessionId.substring(0, 8) : title);
+                    label.setToolTipText(sessionId);
+                }
+                return label;
+            }
+        });
+        historyBox.addActionListener(e -> onHistorySelected());
         JPanel statusRight = new JPanel(new FlowLayout(FlowLayout.RIGHT, 2, 0));
         statusRight.setOpaque(false);
         statusRight.add(newSessionButton);
@@ -200,7 +249,11 @@ public final class ChatPanel extends JPanel implements DshProjectService.Listene
         service.setListener(this);
         String projectRoot = project.getBasePath();
         if (projectRoot != null) {
-            service.ensureSession(projectRoot).thenAccept(sessionId -> loadModels());
+            service.ensureSession(projectRoot).thenAccept(sessionId -> {
+                activeSessionId = sessionId;
+                loadModels();
+                service.refreshSessionList();
+            });
         }
     }
 
@@ -218,6 +271,8 @@ public final class ChatPanel extends JPanel implements DshProjectService.Listene
         try {
             modelBox.removeAllItems();
             modelProviders.clear();
+            modelEffortOptions.clear();
+            modelDefaultEfforts.clear();
             for (JsonElement groupEl : groups) {
                 JsonObject group = groupEl.getAsJsonObject();
                 String provider = group.has("id") ? group.get("id").getAsString() : "";
@@ -229,19 +284,99 @@ public final class ChatPanel extends JPanel implements DshProjectService.Listene
                     if (id.isEmpty()) continue;
                     modelBox.addItem(id);
                     modelProviders.add(provider);
+                    modelEffortOptions.add(parseEffortOptions(modelEl.getAsJsonObject()));
+                    modelDefaultEfforts.add(parseDefaultEffort(modelEl.getAsJsonObject()));
                 }
             }
             // Prefer the server's current selection, then the stored setting.
             String current = null;
+            String currentEffort = null;
             if (catalog.has("current") && catalog.get("current").isJsonObject()) {
                 JsonObject cur = catalog.getAsJsonObject("current");
                 if (cur.has("model")) current = cur.get("model").getAsString();
+                if (cur.has("reasoningEffort") && cur.get("reasoningEffort").isJsonPrimitive()) {
+                    currentEffort = cur.get("reasoningEffort").getAsString();
+                }
             }
             String target = current != null ? current : DshSettingsState.getInstance().model;
             if (target != null) modelBox.setSelectedItem(target);
+            populateEffortForSelection(currentEffort);
         } finally {
             modelSelectionUpdating = false;
         }
+    }
+
+    private static @NotNull List<EffortOption> parseEffortOptions(@NotNull JsonObject model) {
+        List<EffortOption> options = new ArrayList<>();
+        if (!model.has("reasoning") || !model.get("reasoning").isJsonObject()) return options;
+        JsonObject reasoning = model.getAsJsonObject("reasoning");
+        if (!reasoning.has("efforts") || !reasoning.get("efforts").isJsonArray()) return options;
+        for (JsonElement effortEl : reasoning.getAsJsonArray("efforts")) {
+            if (!effortEl.isJsonObject()) continue;
+            JsonObject effort = effortEl.getAsJsonObject();
+            String id = effort.has("id") ? effort.get("id").getAsString() : "";
+            if (id.isEmpty()) continue;
+            String name = effort.has("name") ? effort.get("name").getAsString() : id;
+            options.add(new EffortOption(id, name));
+        }
+        return options;
+    }
+
+    /** The deployment's configured default effort for one model ("" = none). */
+    private static @NotNull String parseDefaultEffort(@NotNull JsonObject model) {
+        if (!model.has("reasoning") || !model.get("reasoning").isJsonObject()) return "";
+        JsonObject reasoning = model.getAsJsonObject("reasoning");
+        if (reasoning.has("defaultEffort") && reasoning.get("defaultEffort").isJsonPrimitive()) {
+            return reasoning.get("defaultEffort").getAsString();
+        }
+        return "";
+    }
+
+    /**
+     * Rebuild the effort dropdown for the currently selected model, mirroring
+     * the dsh web UI: a deployment default effort ({@code reasoning.defaultEffort})
+     * replaces the "Default" entry (because an omitted effort would resolve to
+     * it anyway and look like a no-op), otherwise the provider-default "Default"
+     * entry is offered. The server's current effort wins the pre-selection,
+     * then the deployment/stored default.
+     */
+    private void populateEffortForSelection(@Nullable String catalogEffort) {
+        int index = modelBox.getSelectedIndex();
+        List<EffortOption> options = index >= 0 && index < modelEffortOptions.size()
+                ? modelEffortOptions.get(index) : List.of();
+        String defaultEffort = index >= 0 && index < modelDefaultEfforts.size()
+                ? modelDefaultEfforts.get(index) : "";
+        boolean hasDefault = defaultEffort != null && !defaultEffort.isEmpty();
+        String stored = DshSettingsState.getInstance().reasoningEffort;
+        String preferred = firstNonBlank(catalogEffort, hasDefault ? defaultEffort : null, stored);
+        boolean hasOptions = !options.isEmpty();
+        effortUpdating = true;
+        try {
+            effortBox.removeAllItems();
+            if (!hasDefault) effortBox.addItem(EffortOption.DEFAULT);
+            for (EffortOption option : options) effortBox.addItem(option);
+            EffortOption selected = findEffort(preferred, options);
+            effortBox.setSelectedItem(selected != null ? selected
+                    : (hasDefault && !options.isEmpty() ? options.getFirst() : EffortOption.DEFAULT));
+            effortBox.setEnabled(hasOptions);
+        } finally {
+            effortUpdating = false;
+        }
+    }
+
+    private static @Nullable EffortOption findEffort(@Nullable String id, @NotNull List<EffortOption> options) {
+        if (id == null || id.isEmpty()) return null;
+        for (EffortOption option : options) {
+            if (id.equals(option.id())) return option;
+        }
+        return null;
+    }
+
+    private static @Nullable String firstNonBlank(@Nullable String... values) {
+        for (String value : values) {
+            if (value != null && !value.isBlank()) return value;
+        }
+        return null;
     }
 
     private void onModelChanged() {
@@ -250,15 +385,104 @@ public final class ChatPanel extends JPanel implements DshProjectService.Listene
         if (index < 0 || index >= modelProviders.size()) return;
         String model = modelBox.getItemAt(index);
         String provider = modelProviders.get(index);
-        service.selectModel(provider, model);
+        // Rebuild the effort choices for the new model (no RPC yet), then send
+        // the complete selection (provider/model/effort) in one call.
+        populateEffortForSelection(null);
+        EffortOption effort = (EffortOption) effortBox.getSelectedItem();
+        service.selectModel(provider, model, effort != null ? effort.id() : null);
+    }
+
+    /** The effort dropdown changed (only possible while the model supports it). */
+    private void onEffortChanged() {
+        if (effortUpdating) return;
+        int index = modelBox.getSelectedIndex();
+        if (index < 0 || index >= modelProviders.size()) return;
+        String model = modelBox.getItemAt(index);
+        String provider = modelProviders.get(index);
+        EffortOption effort = (EffortOption) effortBox.getSelectedItem();
+        service.selectModel(provider, model, effort != null ? effort.id() : null);
+    }
+
+    /** History dropdown selection: switch to that session (reload transcript). */
+    private void onHistorySelected() {
+        Object selected = historyBox.getSelectedItem();
+        if (!(selected instanceof SessionEntry entry)) return;
+        if (entry.sessionId.equals(activeSessionId)) return;
+        clearTranscript();
+        turnActive = false;
+        updateSendButton();
+        activeSessionId = entry.sessionId;
+        setStatus("loading session...");
+        service.switchSession(entry.sessionId);
+    }
+
+    private void populateSessionList(@NotNull JsonObject list) {
+        historyBox.removeAllItems();
+        if (!list.has("items") || !list.get("items").isJsonArray()) return;
+        for (JsonElement itemEl : list.getAsJsonArray("items")) {
+            JsonObject item = itemEl.isJsonObject() ? itemEl.getAsJsonObject() : null;
+            if (item == null) continue;
+            // Skip blank (conversation-not-started) sessions per dsh docs.
+            if (item.has("blank") && item.get("blank").getAsBoolean()) continue;
+            String sessionId = item.has("sessionId") ? item.get("sessionId").getAsString() : "";
+            if (sessionId.isEmpty()) continue;
+            String title = extractTitle(item);
+            historyBox.addItem(new SessionEntry(sessionId, title));
+        }
+    }
+
+    private static String extractTitle(@NotNull JsonObject item) {
+        if (item.has("projections") && item.get("projections").isJsonObject()) {
+            JsonObject projections = item.getAsJsonObject("projections");
+            if (projections.has("values") && projections.get("values").isJsonObject()) {
+                JsonObject values = projections.getAsJsonObject("values");
+                if (values.has("title") && values.get("title").isJsonPrimitive()) {
+                    String t = values.get("title").getAsString();
+                    if (t != null && !t.isBlank()) return t;
+                }
+            }
+        }
+        String id = item.has("sessionId") ? item.get("sessionId").getAsString() : "";
+        return id.isEmpty() ? "" : id.substring(0, Math.min(8, id.length()));
+    }
+
+    private void clearTranscript() {
+        streamingAssistant = null;
+        streamingReasoning = null;
+        messageList.clear();
+        messages.removeAll();
+        messages.revalidate();
+        messages.repaint();
+    }
+
+    /** The send/cancel button: sends a prompt when idle, cancels the turn while one runs. */
+    private void onSendButtonClicked() {
+        if (turnActive) {
+            cancelCurrentTurn();
+        } else {
+            sendInput();
+        }
+    }
+
+    private void cancelCurrentTurn() {
+        setStatus("cancelling...");
+        service.cancel();
+    }
+
+    private void updateSendButton() {
+        sendButton.setIcon(turnActive ? CANCEL_ICON : AllIcons.Actions.Execute);
+        sendButton.setToolTipText(turnActive ? "Cancel" : "Send");
     }
 
     private void sendInput() {
+        if (turnActive) return; // the button is in cancel mode; don't stack prompts
         String text = input.getText();
         if (text == null || text.trim().isEmpty() || PLACEHOLDER.equals(text)) return;
         input.setText("");
         streamingAssistant = null;
         streamingReasoning = null;
+        turnActive = true;
+        updateSendButton();
 
         String cwd = Objects.requireNonNullElse(project.getBasePath(), ".");
         addMessage(ChatMessage.user("", text));
@@ -267,13 +491,16 @@ public final class ChatPanel extends JPanel implements DshProjectService.Listene
     }
 
     private void newSession() {
-        streamingAssistant = null;
-        streamingReasoning = null;
-        messageList.clear();
-        messages.removeAll();
-        messages.revalidate();
-        messages.repaint();
-        service.newSession(Objects.requireNonNullElse(project.getBasePath(), "."));
+        clearTranscript();
+        turnActive = false;
+        updateSendButton();
+        setStatus("creating new session...");
+        service.newSession(Objects.requireNonNullElse(project.getBasePath(), ".")).whenComplete((sessionId, error) -> {
+            if (sessionId != null) {
+                activeSessionId = sessionId;
+                service.refreshSessionList();
+            }
+        });
     }
 
     private void onSandboxChanged() {
@@ -283,53 +510,74 @@ public final class ChatPanel extends JPanel implements DshProjectService.Listene
         String mode = (String) selected;
         if (!mode.equals(settings.sandboxMode)) {
             settings.sandboxMode = mode;
+            settings.save();
             setStatus("switching sandbox mode to " + mode + "...");
+            turnActive = false;
+            updateSendButton();
             service.restartServer();
         }
     }
 
     private void addMessage(@NotNull ChatMessage message) {
         messageList.add(message);
-        MessageBubble bubble = new MessageBubble(message, () -> {
-            String rpcId = message.getRpcId();
-            String approvalId = message.getApprovalId();
-            if (rpcId != null && approvalId != null) {
-                service.respondToApproval(rpcId, message.getSessionId(), approvalId, true);
-                message.setApprovalState("allowed-once");
-                updateMessage(message);
-                setStatus("allowed");
-            }
-        }, () -> {
-            String rpcId = message.getRpcId();
-            String approvalId = message.getApprovalId();
-            if (rpcId != null && approvalId != null) {
-                service.respondToApproval(rpcId, message.getSessionId(), approvalId, false);
-                message.setApprovalState("rejected");
-                updateMessage(message);
-                setStatus("denied");
-            }
-        }, () -> {
-            message.setCollapsed(!message.isCollapsed());
-            updateMessage(message);
-        });
+        MessageBubble bubble = createBubble(message);
         messages.add(bubble);
         messages.revalidate();
         scrollToBottom();
     }
 
+    private MessageBubble createBubble(@NotNull ChatMessage message) {
+        return new MessageBubble(message, () -> onAllow(message), () -> onDeny(message), () -> {
+            message.setCollapsed(!message.isCollapsed());
+            updateMessage(message, false);
+        });
+    }
+
+    private void onAllow(@NotNull ChatMessage message) {
+        String rpcId = message.getRpcId();
+        String approvalId = message.getApprovalId();
+        if (rpcId != null && approvalId != null) {
+            service.respondToApproval(rpcId, message.getSessionId(), approvalId, true);
+            message.setApprovalState("allowed-once");
+            removeMessage(message);
+            setStatus("allowed: " + (message.getToolName() != null ? message.getToolName() : "tool"));
+        }
+    }
+
+    private void onDeny(@NotNull ChatMessage message) {
+        String rpcId = message.getRpcId();
+        String approvalId = message.getApprovalId();
+        if (rpcId != null && approvalId != null) {
+            service.respondToApproval(rpcId, message.getSessionId(), approvalId, false);
+            message.setApprovalState("rejected");
+            removeMessage(message);
+            setStatus("denied: " + (message.getToolName() != null ? message.getToolName() : "tool"));
+        }
+    }
+
+    /** Rebuild a message bubble in place, optionally scrolling to the bottom. */
     private void updateMessage(@NotNull ChatMessage message) {
+        updateMessage(message, true);
+    }
+
+    private void updateMessage(@NotNull ChatMessage message, boolean scrollToBottom) {
         int index = messageList.indexOf(message);
         if (index < 0) return;
         messages.remove(index);
-        MessageBubble bubble = new MessageBubble(message, () -> {
-        }, () -> {
-        }, () -> {
-            message.setCollapsed(!message.isCollapsed());
-            updateMessage(message);
-        });
+        MessageBubble bubble = createBubble(message);
         messages.add(bubble, index);
         messages.revalidate();
-        scrollToBottom();
+        if (scrollToBottom) scrollToBottom();
+    }
+
+    /** Remove a message (e.g. an approval card after it is resolved). */
+    private void removeMessage(@NotNull ChatMessage message) {
+        int index = messageList.indexOf(message);
+        if (index < 0) return;
+        messageList.remove(index);
+        messages.remove(index);
+        messages.revalidate();
+        messages.repaint();
     }
 
     private void scrollToBottom() {
@@ -421,12 +669,238 @@ public final class ChatPanel extends JPanel implements DshProjectService.Listene
     @Override
     public void onTurn(@NotNull String sessionId, boolean started, @Nullable String reason) {
         if (started) {
+            turnActive = true;
             setStatus("turn started");
         } else {
+            turnActive = false;
             streamingAssistant = null;
             streamingReasoning = null;
             setStatus("turn finished" + (reason != null ? ": " + reason : ""));
         }
+        updateSendButton();
+    }
+
+    @Override
+    public void onAssistantMessage(@NotNull String sessionId, @NotNull String text,
+                                   long uncachedInput, long cacheRead, long output) {
+        ChatMessage target = streamingAssistant;
+        if (target == null) {
+            target = ChatMessage.assistant(sessionId, text);
+            streamingAssistant = target;
+            addMessage(target);
+        }
+        target.setTokenUsage(uncachedInput, cacheRead, output);
+        updateMessage(target);
+    }
+
+    @Override
+    public void onTokenUsage(@NotNull String sessionId, long uncachedInput, long cacheRead,
+                             long cacheWrite, long output) {
+        long total = uncachedInput + cacheRead + cacheWrite + output;
+        tokenLabel.setText("tokens: " + MessageBubble.formatK(total));
+    }
+
+    @Override
+    public void onTitleChanged(@NotNull String sessionId, @NotNull String title) {
+        service.refreshSessionList();
+    }
+
+    @Override
+    public void onSessionListRefreshed(@NotNull JsonObject list) {
+        populateSessionList(list);
+    }
+
+    @Override
+    public void onHistoryLoaded(@NotNull String sessionId, @NotNull JsonArray events) {
+        clearTranscript();
+        activeSessionId = sessionId;
+        rebuildFromHistory(events);
+        scrollToBottom();
+        setStatus("session loaded");
+    }
+
+    /** Rebuild the transcript bubbles from a session.history event list. */
+    private void rebuildFromHistory(@NotNull JsonArray events) {
+        for (JsonElement entryEl : events) {
+            JsonObject entry = entryEl.isJsonObject() ? entryEl.getAsJsonObject() : null;
+            if (entry == null) continue;
+            if (!entry.has("event") || !entry.get("event").isJsonObject()) continue;
+            JsonObject event = entry.getAsJsonObject("event");
+            String type = event.has("type") ? event.get("type").getAsString() : "";
+            JsonObject data = event.has("data") && event.get("data").isJsonObject()
+                    ? event.getAsJsonObject("data") : new JsonObject();
+            switch (type) {
+                case "user/message" -> {
+                    String text = extractTextContent(data.get("content"));
+                    if (!text.isEmpty()) addMessage(ChatMessage.user(activeSessionId, text));
+                }
+                case "assistant/message" -> {
+                    JsonElement contentEl = data.has("message") && data.get("message").isJsonObject()
+                            ? data.getAsJsonObject("message").get("content") : null;
+                    rebuildAssistantContent(contentEl, data);
+                }
+                case "tool/call" -> {
+                    String callId = data.has("callId") ? data.get("callId").getAsString() : "";
+                    if (callId.isEmpty()) break;
+                    ChatMessage existing = findToolCall(callId);
+                    if (existing != null) {
+                        if (data.has("name")) existing.setToolName(data.get("name").getAsString());
+                        if (data.has("arguments")) existing.setArguments(data.get("arguments").getAsString());
+                        updateMessage(existing, false);
+                    } else {
+                        String name = data.has("name") ? data.get("name").getAsString() : "tool";
+                        String arguments = data.has("arguments") ? data.get("arguments").getAsString() : null;
+                        ChatMessage card = ChatMessage.toolCall(activeSessionId, callId, name, arguments);
+                        card.setToolRunning(false); // historical call is already finished
+                        addMessage(card);
+                    }
+                }
+                case "tool/result" -> {
+                    // Bind the result to the already-rendered tool card (the
+                    // tool-call event/block created it earlier in the log).
+                    String callId = extractToolCallId(data);
+                    if (callId == null || callId.isEmpty()) break;
+                    ChatMessage card = findToolCall(callId);
+                    if (card == null) {
+                        card = ChatMessage.toolCall(activeSessionId, callId, "tool", null);
+                        card.setToolRunning(false);
+                        addMessage(card);
+                    }
+                    card.setToolRunning(false);
+                    String result = extractToolResultText(data);
+                    boolean isError = data.has("error") && data.get("error").isJsonObject()
+                            || data.has("message") && data.get("message").isJsonObject()
+                            && data.getAsJsonObject("message").has("isError")
+                            && data.getAsJsonObject("message").get("isError").getAsBoolean();
+                    if (isError) {
+                        card.setToolError(result.isBlank() ? "tool execution failed" : result);
+                    } else if (!result.isBlank()) {
+                        card.appendResult(result);
+                    }
+                    updateMessage(card, false);
+                }
+                default -> {
+                    // tool/result, turn markers, request/context: handled via the
+                    // assistant/message content blocks or skipped.
+                }
+            }
+        }
+    }
+
+    /** Render the content blocks of one assistant message (text + reasoning + tool-call). */
+    private void rebuildAssistantContent(@Nullable JsonElement contentEl, @NotNull JsonObject data) {
+        if (contentEl == null || !contentEl.isJsonArray()) return;
+        StringBuilder text = new StringBuilder();
+        JsonArray reasoningBlocks = new JsonArray();
+        JsonArray toolCallBlocks = new JsonArray();
+        for (JsonElement blockEl : contentEl.getAsJsonArray()) {
+            JsonObject block = blockEl.isJsonObject() ? blockEl.getAsJsonObject() : null;
+            if (block == null) continue;
+            String blockType = block.has("type") ? block.get("type").getAsString() : "";
+            switch (blockType) {
+                case "text" -> {
+                    if (block.has("text")) {
+                        if (!text.isEmpty()) text.append('\n');
+                        text.append(block.get("text").getAsString());
+                    }
+                }
+                case "reasoning" -> reasoningBlocks.add(block);
+                case "tool-call" -> toolCallBlocks.add(block);
+                default -> {
+                    // image, embedded-resource, etc. skip
+                }
+            }
+        }
+
+        if (!text.isEmpty() || reasoningBlocks.isEmpty() && toolCallBlocks.isEmpty()) {
+            ChatMessage msg = ChatMessage.assistant(activeSessionId, text.toString());
+            if (data.has("usage") && data.get("usage").isJsonObject()) {
+                JsonObject usage = data.getAsJsonObject("usage");
+                long uncached = usage.has("inputTokens") ? usage.get("inputTokens").getAsLong() : 0;
+                long cacheRead = usage.has("cacheReadTokens") ? usage.get("cacheReadTokens").getAsLong() : 0;
+                long output = usage.has("outputTokens") ? usage.get("outputTokens").getAsLong() : 0;
+                msg.setTokenUsage(uncached, cacheRead, output);
+            }
+            addMessage(msg);
+        }
+
+        for (JsonElement rbEl : reasoningBlocks) {
+            JsonObject rb = rbEl.getAsJsonObject();
+            String rtext = rb.has("text") ? rb.get("text").getAsString() : "";
+            if (!rtext.isEmpty()) addMessage(ChatMessage.reasoning(activeSessionId, rtext));
+        }
+        for (JsonElement tbEl : toolCallBlocks) {
+            JsonObject tb = tbEl.getAsJsonObject();
+            String callId = tb.has("id") ? tb.get("id").getAsString() : "";
+            String name = tb.has("name") ? tb.get("name").getAsString() : "tool";
+            String arguments = tb.has("arguments") ? tb.get("arguments").getAsString() : null;
+            ChatMessage existing = callId.isEmpty() ? null : findToolCall(callId);
+            if (existing != null) {
+                if (!name.equals("tool")) existing.setToolName(name);
+                if (arguments != null) existing.setArguments(arguments);
+                updateMessage(existing, false);
+            } else {
+                ChatMessage card = ChatMessage.toolCall(activeSessionId, callId, name, arguments);
+                card.setToolRunning(false);
+                addMessage(card);
+            }
+        }
+    }
+
+    private static String extractTextContent(@Nullable JsonElement content) {
+        if (content == null || !content.isJsonArray()) return "";
+        StringBuilder sb = new StringBuilder();
+        for (JsonElement blockEl : content.getAsJsonArray()) {
+            JsonObject block = blockEl.isJsonObject() ? blockEl.getAsJsonObject() : null;
+            if (block == null) continue;
+            if (!block.has("type") || !"text".equals(block.get("type").getAsString())) continue;
+            if (block.has("text")) {
+                if (!sb.isEmpty()) sb.append('\n');
+                sb.append(block.get("text").getAsString());
+            }
+        }
+        return sb.toString();
+    }
+
+    /**
+     * The tool call id referenced by a {@code tool/result} event. The event's
+     * {@code message.content[0].toolCallId} is the authoritative id.
+     */
+    private static @Nullable String extractToolCallId(@NotNull JsonObject data) {
+        if (data.has("message") && data.get("message").isJsonObject()) {
+            JsonObject message = data.getAsJsonObject("message");
+            if (message.has("content") && message.get("content").isJsonArray()) {
+                JsonArray content = message.getAsJsonArray("content");
+                if (!content.isEmpty() && content.get(0).isJsonObject()) {
+                    JsonObject first = content.get(0).getAsJsonObject();
+                    if (first.has("toolCallId")) return first.get("toolCallId").getAsString();
+                }
+            }
+        }
+        if (data.has("callId")) return data.get("callId").getAsString();
+        return null;
+    }
+
+    /** Concatenated text of a {@code tool/result} event's result blocks. */
+    private static @NotNull String extractToolResultText(@NotNull JsonObject data) {
+        if (!data.has("message") || !data.get("message").isJsonObject()) return "";
+        JsonObject message = data.getAsJsonObject("message");
+        if (!message.has("content") || !message.get("content").isJsonArray()) return "";
+        StringBuilder sb = new StringBuilder();
+        for (JsonElement blockEl : message.getAsJsonArray("content")) {
+            JsonObject block = blockEl.isJsonObject() ? blockEl.getAsJsonObject() : null;
+            if (block == null) continue;
+            if (!block.has("content") || !block.get("content").isJsonArray()) continue;
+            for (JsonElement cbEl : block.getAsJsonArray("content")) {
+                JsonObject cb = cbEl.isJsonObject() ? cbEl.getAsJsonObject() : null;
+                if (cb != null && cb.has("type") && "text".equals(cb.get("type").getAsString())
+                        && cb.has("text")) {
+                    if (!sb.isEmpty()) sb.append('\n');
+                    sb.append(cb.get("text").getAsString());
+                }
+            }
+        }
+        return sb.toString();
     }
 
     @Override
@@ -440,7 +914,8 @@ public final class ChatPanel extends JPanel implements DshProjectService.Listene
         ChatMessage msg = findPermission(approvalId);
         if (msg == null) return;
         msg.setApprovalState(outcome);
-        updateMessage(msg);
+        removeMessage(msg);
+        setStatus("permission " + outcome + (msg.getToolName() != null ? ": " + msg.getToolName() : ""));
     }
 
     @Override
@@ -455,6 +930,8 @@ public final class ChatPanel extends JPanel implements DshProjectService.Listene
 
     @Override
     public void onStreamError(@NotNull String message) {
+        turnActive = false;
+        updateSendButton();
         setStatus("stream error: " + message);
         addMessage(ChatMessage.status("", "error: " + message));
     }
@@ -469,6 +946,11 @@ public final class ChatPanel extends JPanel implements DshProjectService.Listene
 
     @Override
     public void onStatusChanged(@NotNull String status) {
+        String s = status.toLowerCase();
+        if (turnActive && (s.contains("disconnect") || s.contains("error") || s.contains("failed"))) {
+            turnActive = false;
+            updateSendButton();
+        }
         setStatus(status);
     }
 
@@ -488,12 +970,34 @@ public final class ChatPanel extends JPanel implements DshProjectService.Listene
         return STATUS_GREEN;
     }
 
+    /** One history-dropdown row: session identity + display title. */
+    private record SessionEntry(String sessionId, String title) {
+
+        @Override
+        @NotNull
+        public String toString() {
+            return title.isEmpty() ? sessionId : title;
+        }
+    }
+
+    /** One reasoning-effort dropdown row: catalog id + display name. */
+    private record EffortOption(@NotNull String id, @NotNull String name) {
+
+        /** "Default": do not send a reasoningEffort; the provider decides. */
+        static final EffortOption DEFAULT = new EffortOption("", "Default");
+
+        @Override
+        @NotNull
+        public String toString() {
+            return name;
+        }
+    }
+
     /** Rounded input frame; the border color highlights while the input is focused. */
-    private static final class InputFrame extends JPanel {
+    public static final class InputFrame extends JPanel {
         private final int arc = JBUI.scale(12);
         private Color borderColor;
         private final JPanel bottomPanel;
-        private final List<JComponent> innerComponents = new ArrayList<>();
 
         InputFrame(Color background, Color border) {
             super(new BorderLayout());
@@ -514,7 +1018,6 @@ public final class ChatPanel extends JPanel implements DshProjectService.Listene
 
         public void addToBottom(JComponent component, Object direction) {
             bottomPanel.add(component, direction);
-            innerComponents.add(component);
         }
 
         @Override

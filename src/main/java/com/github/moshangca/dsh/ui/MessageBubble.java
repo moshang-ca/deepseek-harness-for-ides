@@ -58,28 +58,71 @@ public final class MessageBubble extends JPanel {
 
     @Override
     public Dimension getMaximumSize() {
+        if (message.getKind() == ChatMessage.Kind.ASSISTANT
+                || message.getKind() == ChatMessage.Kind.REASONING) {
+            return new Dimension(Integer.MAX_VALUE, Integer.MAX_VALUE);
+        }
         return new Dimension(Integer.MAX_VALUE, getPreferredSize().height);
     }
 
     private JComponent buildUser() {
         RoundedPanel bubble = new RoundedPanel(new BorderLayout(), USER_BACKGROUND);
         bubble.setBorder(JBUI.Borders.empty(8, 12));
-        JBLabel label = wrapText(message.getText(), Color.WHITE);
+        JBLabel label = wrapText(message.getText(), JBColor.WHITE);
         bubble.add(label, BorderLayout.CENTER);
         return bubble;
     }
 
     private JComponent buildAssistant() {
+        JPanel panel = new JPanel();
+        panel.setLayout(new BoxLayout(panel, BoxLayout.Y_AXIS));
+        panel.setOpaque(false);
+        panel.setBorder(JBUI.Borders.empty(2));
+        panel.setAlignmentX(Component.LEFT_ALIGNMENT);
+
         JBLabel label = wrapText(message.getText());
         label.setBorder(JBUI.Borders.empty(4, 2));
-        return label;
+        label.setAlignmentX(Component.LEFT_ALIGNMENT);
+        label.setMaximumSize(new Dimension(Integer.MAX_VALUE, Integer.MAX_VALUE));
+        panel.add(label);
+
+        // Per-message token detail: uncached input, output, cache hits + ratio.
+        long uncached = message.getUncachedInputTokens();
+        long cacheRead = message.getCacheReadTokens();
+        long output = message.getOutputTokens();
+        if (uncached > 0 || cacheRead > 0 || output > 0) {
+            long hitTotal = cacheRead + uncached;
+            int hitPercent = hitTotal > 0 ? (int) Math.round(100.0 * cacheRead / hitTotal) : 0;
+            String detail = "↑" + formatK(uncached) + " · ↓" + formatK(output)
+                    + " · cache hit " + formatK(cacheRead) + " (" + hitPercent + "%)";
+            JLabel tokenLabel = new JLabel(detail);
+            tokenLabel.setForeground(MUTED_TEXT);
+            tokenLabel.setFont(tokenLabel.getFont().deriveFont(Font.PLAIN, tokenLabel.getFont().getSize() - 2));
+            tokenLabel.setBorder(JBUI.Borders.empty(0, 2, 2, 2));
+            tokenLabel.setAlignmentX(Component.LEFT_ALIGNMENT);
+            tokenLabel.setMaximumSize(new Dimension(Integer.MAX_VALUE, tokenLabel.getPreferredSize().height));
+            panel.add(tokenLabel);
+        }
+
+        panel.setMaximumSize(new Dimension(Integer.MAX_VALUE, Integer.MAX_VALUE));
+        return panel;
+    }
+
+    static String formatK(long value) {
+        if (value >= 1_000_000) {
+            return String.format("%.1fM", value / 1_000_000.0);
+        }
+        if (value >= 1_000) {
+            return String.format("%.1fk", value / 1_000.0);
+        }
+        return String.valueOf(value);
     }
 
     private JComponent buildReasoning() {
         JPanel panel = new JPanel();
         panel.setLayout(new BoxLayout(panel, BoxLayout.Y_AXIS));
         panel.setOpaque(false);
-        panel.setBorder(JBUI.Borders.empty(2, 2));
+        panel.setBorder(JBUI.Borders.empty(2));
 
         JLabel header = new JLabel((message.isCollapsed() ? "▸ " : "▾ ") + "thinking");
         header.setForeground(MUTED_TEXT);
@@ -158,7 +201,7 @@ public final class MessageBubble extends JPanel {
     private JComponent monospaceBlock(String title, String text, boolean error) {
         JPanel block = new JPanel(new BorderLayout());
         block.setOpaque(false);
-        block.setBorder(JBUI.Borders.empty(4, 0, 0, 0));
+        block.setBorder(JBUI.Borders.emptyTop(4));
         block.setAlignmentX(Component.LEFT_ALIGNMENT);
 
         JLabel label = new JLabel(title);
@@ -173,7 +216,7 @@ public final class MessageBubble extends JPanel {
         area.setFont(new Font(Font.MONOSPACED, Font.PLAIN, 12));
         area.setLineWrap(true);
         area.setWrapStyleWord(true);
-        area.setBorder(JBUI.Borders.empty(4, 4));
+        area.setBorder(JBUI.Borders.empty(4));
         if (error) area.setForeground(ERROR_COLOR);
 
         JScrollPane scroll = new JBScrollPane(area,
@@ -202,7 +245,7 @@ public final class MessageBubble extends JPanel {
         if (state != null) {
             JBLabel badge = new JBLabel(state);
             badge.setForeground("allowed-once".equals(state) ? ALLOWED_COLOR : MUTED_TEXT);
-            badge.setBorder(JBUI.Borders.empty(0, 8, 0, 0));
+            badge.setBorder(JBUI.Borders.emptyLeft(8));
             top.add(badge, BorderLayout.EAST);
             card.add(top, BorderLayout.CENTER);
             return card;
@@ -224,7 +267,7 @@ public final class MessageBubble extends JPanel {
 
     private JComponent buildStatus() {
         JBLabel label = new JBLabel("<html><font color=\"" + toHex(MUTED_TEXT) + "\">" + escapeHtml(message.getText()) + "</font></html>");
-        label.setBorder(JBUI.Borders.empty(2, 2));
+        label.setBorder(JBUI.Borders.empty(2));
         return label;
     }
 

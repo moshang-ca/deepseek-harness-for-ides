@@ -47,6 +47,11 @@ public final class DshServerManager implements DshApiListener {
 
         void onQueueChanged(@NotNull String sessionId, int queued, int steering);
 
+        void onTokenUsage(@NotNull String sessionId, long uncachedInput, long cacheRead,
+                          long cacheWrite, long output);
+
+        void onTitleChanged(@NotNull String sessionId, @NotNull String title);
+
         void onStreamError(@NotNull String message);
 
         void onDisconnected();
@@ -69,7 +74,6 @@ public final class DshServerManager implements DshApiListener {
         return ApplicationManager.getApplication().getService(DshServerManager.class);
     }
 
-    /** Register the caller as a server user (start-on-demand, stop at zero users). */
     public synchronized void acquire() {
         userCount++;
     }
@@ -79,7 +83,6 @@ public final class DshServerManager implements DshApiListener {
         if (userCount <= 0) shutdown();
     }
 
-    /** Stop the server and drop all session registrations. */
     public synchronized void restart() {
         shutdown();
     }
@@ -94,6 +97,18 @@ public final class DshServerManager implements DshApiListener {
 
     public void unregisterSession(@NotNull String sessionId) {
         listeners.remove(sessionId);
+    }
+
+    /**
+     * List all sessions on the shared server. Requires the server to be
+     * started; returns an empty value if it is not running.
+     */
+    public @NotNull CompletableFuture<JsonObject> listSessions() {
+        DshApiClient client = clientRef.get();
+        if (client == null) {
+            return CompletableFuture.completedFuture(new JsonObject());
+        }
+        return client.listSessions();
     }
 
     /**
@@ -172,12 +187,7 @@ public final class DshServerManager implements DshApiListener {
         DshApiEvents events = new DshApiEvents(baseUrl, this);
         eventsRef.set(events);
         events.connect();
-        processManager.setListener(exitCode -> {
-            // The mux close (onDisconnected) performs cleanup and broadcasting.
-            LOG.info("dsh exited (" + exitCode + ")");
-        });
-        // Inject the configured API key unless the launching environment already
-        // provides it read-only (credentials.set would be rejected then).
+        processManager.setListener(exitCode -> LOG.info("dsh exited (" + exitCode + ")"));
         if (settings.apiKey != null && !settings.apiKey.isBlank()) {
             client.describeCredential("DEEPSEEK_API_KEY").whenComplete((describe, error) -> {
                 if (error != null) {
@@ -241,6 +251,19 @@ public final class DshServerManager implements DshApiListener {
     public void onQueueChanged(@NotNull String sessionId, int queued, int steering) {
         SessionListener l = listeners.get(sessionId);
         if (l != null) l.onQueueChanged(sessionId, queued, steering);
+    }
+
+    @Override
+    public void onTokenUsage(@NotNull String sessionId, long uncachedInput, long cacheRead,
+                             long cacheWrite, long output) {
+        SessionListener l = listeners.get(sessionId);
+        if (l != null) l.onTokenUsage(sessionId, uncachedInput, cacheRead, cacheWrite, output);
+    }
+
+    @Override
+    public void onTitleChanged(@NotNull String sessionId, @NotNull String title) {
+        SessionListener l = listeners.get(sessionId);
+        if (l != null) l.onTitleChanged(sessionId, title);
     }
 
     @Override

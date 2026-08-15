@@ -171,7 +171,35 @@ public final class DshApiEvents {
                 }
                 listener.onQueueChanged(sessionId, queued, steering);
             }
+            case "session/projection" -> handleProjection(sessionId, payload);
             default -> LOG.debug("mux frame type=" + type + " session=" + sessionId);
+        }
+    }
+
+    /**
+     * {@code session/projection} carries per-session derived values keyed by
+     * projection name. We consume {@code tokenUsage} (cumulative token buckets)
+     * and {@code title} (auto-generated or user-set session title); all other
+     * keys are ignored.
+     */
+    private void handleProjection(@NotNull String sessionId, @NotNull JsonObject payload) {
+        String key = payload.has("key") ? payload.get("key").getAsString() : "";
+        if (!payload.has("value") || !payload.get("value").isJsonObject()) return;
+        JsonObject value = payload.getAsJsonObject("value");
+        switch (key) {
+            case "tokenUsage" -> {
+                long uncached = value.has("uncachedInputTokens") ? value.get("uncachedInputTokens").getAsLong() : 0;
+                long cacheRead = value.has("cacheReadTokens") ? value.get("cacheReadTokens").getAsLong() : 0;
+                long cacheWrite = value.has("cacheWriteTokens") ? value.get("cacheWriteTokens").getAsLong() : 0;
+                long output = value.has("outputTokens") ? value.get("outputTokens").getAsLong() : 0;
+                listener.onTokenUsage(sessionId, uncached, cacheRead, cacheWrite, output);
+            }
+            case "title" -> {
+                String title = value.has("title") && value.get("title").isJsonPrimitive()
+                        ? value.get("title").getAsString() : "";
+                listener.onTitleChanged(sessionId, title);
+            }
+            default -> LOG.debug("mux projection key=" + key + " session=" + sessionId);
         }
     }
 }

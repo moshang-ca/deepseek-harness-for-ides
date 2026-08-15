@@ -17,22 +17,17 @@ public final class DshSettingsState implements PersistentStateComponent<DshSetti
     public String model = DshConfig.DEFAULT_MODEL;
     public String apiKey = "";
     public int port = DshConfig.DEFAULT_PORT;
-    /**
-     * Sandbox mode: "workspace-write" (safe default) or "danger-full-access"
-     * (allows cross-project access). On Windows the workspace-write runner
-     * (restricted-token ACL) makes Git Bash crash at startup
-     * ("couldn't create signal pipe, Win32 error 5"), so Windows defaults to
-     * danger-full-access; Linux/macOS keep the safe workspace-write default.
-     */
-    public String sandboxMode = defaultSandboxMode();
-
-    private static String defaultSandboxMode() {
-        String os = System.getProperty("os.name", "").toLowerCase();
-        return os.contains("win") ? DshConfig.SANDBOX_MODE_FULL : DshConfig.SANDBOX_MODE_WORKSPACE;
-    }
+    /** Sandbox mode: read-only by default (safest); workspace-write / danger-full-access opt-in. */
+    public String sandboxMode = DshConfig.SANDBOX_MODE_READ_ONLY;
+    /** Selected reasoning effort id ("" = provider default); "off"/"high"/... as the model supports. */
+    public String reasoningEffort = "";
 
     public static DshSettingsState getInstance() {
         return ApplicationManager.getApplication().getService(DshSettingsState.class);
+    }
+
+    public void save() {
+        ApplicationManager.getApplication().saveSettings();
     }
 
     @Override
@@ -47,5 +42,6 @@ public final class DshSettingsState implements PersistentStateComponent<DshSetti
         this.apiKey = state.apiKey;
         this.port = state.port;
         this.sandboxMode = state.sandboxMode;
+        this.reasoningEffort = state.reasoningEffort;
     }
 }

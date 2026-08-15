@@ -6,6 +6,7 @@ import com.intellij.execution.process.ProcessEvent;
 import com.intellij.execution.process.ProcessListener;
 import com.intellij.openapi.diagnostic.Logger;
 import com.intellij.openapi.util.Key;
+import com.intellij.util.io.BaseOutputReader;
 import org.jetbrains.annotations.NotNull;
 import org.jetbrains.annotations.Nullable;
 
@@ -118,8 +119,8 @@ public final class DshProcessManager {
      * injected through the credentials service (see {@code DshApiClient}) so
      * it is not shadowed by a launch-time environment variable.</p>
      *
-     * @param sandboxMode one of {@link DshConfig#SANDBOX_MODE_WORKSPACE} or
-     *                    {@link DshConfig#SANDBOX_MODE_FULL}
+     * @param sandboxMode one of {@link DshConfig#SANDBOX_MODES}
+     *                    (read-only / workspace-write / danger-full-access)
      * @return the started process, or null on failure
      */
     public @Nullable Process start(@NotNull String sandboxMode) {
@@ -145,9 +146,11 @@ public final class DshProcessManager {
                     .withWorkDirectory(workDir.toFile())
                     .withCharset(StandardCharsets.UTF_8);
             commandLine.getEnvironment().put(DshConfig.DSH_PERMISSION_MODE_ENV, sandboxMode);
-            String path = System.getenv("PATH");
-            if (path != null) {
-                commandLine.getEnvironment().put("PATH", augmentPathForBash(path));
+            if (!isWindows()) {
+                String path = System.getenv("PATH");
+                if (path != null) {
+                    commandLine.getEnvironment().put("PATH", augmentPathForBash(path));
+                }
             }
 
             Process child = commandLine.createProcess();
@@ -192,7 +195,7 @@ public final class DshProcessManager {
     }
 
     private static boolean isPortFree(int port) {
-        try (java.net.ServerSocket socket =
+        try (java.net.ServerSocket ignored =
                      new java.net.ServerSocket(port, 1, java.net.InetAddress.getLoopbackAddress())) {
             return true;
         } catch (java.io.IOException e) {
@@ -308,7 +311,12 @@ public final class DshProcessManager {
                     .withWorkDirectory(workDir.toFile())
                     .withCharset(StandardCharsets.UTF_8);
 
-            OSProcessHandler handler = new OSProcessHandler(commandLine);
+            OSProcessHandler handler = new OSProcessHandler(commandLine) {
+                @Override
+                protected BaseOutputReader.@NotNull Options readerOptions() {
+                    return BaseOutputReader.Options.forMostlySilentProcess();
+                }
+            };
             AtomicBoolean aborted = new AtomicBoolean(false);
             handler.addProcessListener(new ProcessListener() {
                 @Override
@@ -423,10 +431,14 @@ public final class DshProcessManager {
         return null;
     }
 
+    private static boolean isWindows() {
+        return System.getProperty("os.name", "").toLowerCase().contains("win");
+    }
+
     /**
      * Prepend Git Bash directories to the given PATH so the dsh child can spawn
-     * {@code bash} and the usual Unix utilities. No-op when bash is already on
-     * the PATH or no Git installation is found.
+     * {@code bash} and the usual Unix utilities. Only used on non-Windows
+     * platforms (Windows disables the bash tool and uses pwsh instead).
      */
     private static @NotNull String augmentPathForBash(@NotNull String path) {
         String[] gitRoots = {

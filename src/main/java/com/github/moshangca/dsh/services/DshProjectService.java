@@ -76,6 +76,23 @@ public final class DshProjectService implements DshServerManager.SessionListener
         /** The transient inbox snapshot changed. */
         void onQueueChanged(@NotNull String sessionId, int queued, int steering);
 
+        /** The session's cumulative token usage changed (all four buckets). */
+        void onTokenUsage(@NotNull String sessionId, long uncachedInput, long cacheRead,
+                          long cacheWrite, long output);
+
+        /** The session title changed. */
+        void onTitleChanged(@NotNull String sessionId, @NotNull String title);
+
+        /** A completed assistant message with its per-message token usage arrived. */
+        void onAssistantMessage(@NotNull String sessionId, @NotNull String text,
+                                long uncachedInput, long cacheRead, long output);
+
+        /** The session list was refreshed (populate the history dropdown). */
+        void onSessionListRefreshed(@NotNull JsonObject list);
+
+        /** History for a switched-to session was loaded; replace the transcript. */
+        void onHistoryLoaded(@NotNull String sessionId, @NotNull JsonArray events);
+
         /** Generic status message. */
         void onStatusChanged(@NotNull String status);
     }
@@ -132,9 +149,19 @@ public final class DshProjectService implements DshServerManager.SessionListener
         ensureSession(cwd).thenAccept(sessionId -> prompt(sessionId, text));
     }
 
-    public void newSession(@NotNull String cwd) {
+    /** Cancel the active turn of the current session (no-op when idle). */
+    public void cancel() {
+        DshApiClient client = clientRef.get();
+        String sessionId = sessionIdRef.get();
+        if (client == null || sessionId == null) return;
+        client.cancel(sessionId).whenComplete((result, error) -> {
+            if (error != null) LOG.warn("cancel failed", error);
+        });
+    }
+
+    public @NotNull CompletableFuture<String> newSession(@NotNull String cwd) {
         sessionIdRef.set(null);
-        ensureSession(cwd);
+        return ensureSession(cwd);
     }
 
     public void restartServer() {
@@ -152,7 +179,8 @@ public final class DshProjectService implements DshServerManager.SessionListener
                 || settings.model == null || settings.model.isBlank()) {
             return;
         }
-        client.selectModel(sessionId, settings.provider, settings.model).whenComplete((result, error) -> {
+        String effort = settings.reasoningEffort;
+        client.selectModel(sessionId, settings.provider, settings.model, effort).whenComplete((result, error) -> {
             if (error != null) LOG.warn("failed to apply default model " + settings.model, error);
         });
     }
@@ -166,23 +194,111 @@ public final class DshProjectService implements DshServerManager.SessionListener
         return client.models(sessionId);
     }
 
-    public void selectModel(@NotNull String provider, @NotNull String model) {
+    /**
+     * Select a model with an optional reasoning effort and persist the choice.
+     *
+     * @param reasoningEffort the effort id ("" or null = provider default, e.g.
+     *                        when the dropdown's Default entry is selected)
+     */
+    public void selectModel(@NotNull String provider, @NotNull String model,
+                            @Nullable String reasoningEffort) {
         DshSettingsState settings = DshSettingsState.getInstance();
         settings.provider = provider;
         settings.model = model;
+        settings.reasoningEffort = reasoningEffort == null ? "" : reasoningEffort;
+        settings.save();
         DshApiClient client = clientRef.get();
         String sessionId = sessionIdRef.get();
         if (client == null || sessionId == null) {
             return;
         }
-        client.selectModel(sessionId, provider, model).whenComplete((result, error) -> {
+        client.selectModel(sessionId, provider, model, reasoningEffort).whenComplete((result, error) -> {
             if (error != null) {
                 LOG.warn("selectModel failed", error);
                 ApplicationManager.getApplication().invokeLater(() -> status("model switch failed: " + error.getMessage()));
             } else {
-                ApplicationManager.getApplication().invokeLater(() -> status("model: " + model));
+                String effortText = reasoningEffort == null || reasoningEffort.isEmpty()
+                        ? "" : " · effort " + reasoningEffort;
+                ApplicationManager.getApplication().invokeLater(() -> status("model: " + model + effortText));
             }
         });
+    }
+
+    /**
+     * Fetch the server's session list and hand it to the UI for the history
+     * dropdown. Requires the server to be started; no-ops when it is not.
+     */
+    public void refreshSessionList() {
+        serverManager.ensureStarted(project).thenCompose(client -> {
+            clientRef.set(client);
+            return serverManager.listSessions();
+        }).whenComplete((list, error) -> {
+            if (error != null) {
+                LOG.warn("session list fetch failed", error);
+                return;
+            }
+            ApplicationManager.getApplication().invokeLater(() -> {
+                Listener l = uiListener;
+                if (l != null) l.onSessionListRefreshed(list);
+            });
+        });
+    }
+
+    /**
+     * Load a session's history (the raw SessionEvent list) for display.
+     *
+     * @param sessionId the session to load
+     * @param maxMessages maximum messages to fetch (nullable for host default)
+     */
+    public void fetchHistory(@NotNull String sessionId, @Nullable Integer maxMessages) {
+        DshApiClient client = clientRef.get();
+        if (client == null) {
+            LOG.warn("cannot fetch history without an active dsh connection");
+            return;
+        }
+        client.history(sessionId, maxMessages).whenComplete((result, error) -> {
+            if (error != null) {
+                LOG.warn("history fetch failed", error);
+                ApplicationManager.getApplication().invokeLater(() -> {
+                    Listener l = uiListener;
+                    if (l != null) l.onStatusChanged("history load failed: " + error.getMessage());
+                });
+                return;
+            }
+            JsonArray events = result.has("events") && result.get("events").isJsonArray()
+                    ? result.getAsJsonArray("events") : new JsonArray();
+            ApplicationManager.getApplication().invokeLater(() -> {
+                Listener l = uiListener;
+                if (l != null) l.onHistoryLoaded(sessionId, events);
+            });
+        });
+    }
+
+    /**
+     * Switch the project's active session to another one (from the history
+     * dropdown). Cancels the current session, unregisters its listener, and
+     * hands the history events to the UI for a full transcript rebuild.
+     *
+     * @param newSessionId the session to switch to
+     */
+    public void switchSession(@NotNull String newSessionId) {
+        String oldSessionId = sessionIdRef.get();
+        if (oldSessionId != null && oldSessionId.equals(newSessionId)) {
+            return;
+        }
+        if (oldSessionId != null) {
+            serverManager.unregisterSession(oldSessionId);
+            DshApiClient client = clientRef.get();
+            if (client != null) {
+                try {
+                    client.cancel(oldSessionId);
+                } catch (Exception ignored) {
+                }
+            }
+        }
+        sessionIdRef.set(newSessionId);
+        serverManager.registerSession(newSessionId, this);
+        fetchHistory(newSessionId, null);
     }
 
     private void prompt(@NotNull String sessionId, @NotNull String text) {
@@ -237,6 +353,7 @@ public final class DshProjectService implements DshServerManager.SessionListener
     public void onSessionEvent(@NotNull String sessionId, @NotNull String type, @NotNull JsonObject data) {
         switch (type) {
             case "assistant/chunk" -> handleChunk(sessionId, data);
+            case "assistant/message" -> handleAssistantMessage(sessionId, data);
             case "tool/call" -> handleToolCall(sessionId, data);
             case "tool/result" -> handleToolResult(sessionId, data);
             case "turn/start" -> ApplicationManager.getApplication().invokeLater(() -> {
@@ -253,6 +370,47 @@ public final class DshProjectService implements DshServerManager.SessionListener
             }
             default -> LOG.debug("unhandled session event: " + type);
         }
+    }
+
+    /**
+     * {@code assistant/message} carries the finalized assistant message plus its
+     * per-message token usage ({@code data.usage}: inputTokens/cacheReadTokens/
+     * outputTokens). The UI binds this to the streaming message that the text
+     * deltas already rendered.
+     */
+    private void handleAssistantMessage(@NotNull String sessionId, @NotNull JsonObject data) {
+        StringBuilder text = new StringBuilder();
+        if (data.has("message") && data.get("message").isJsonObject()) {
+            JsonObject message = data.getAsJsonObject("message");
+            if (message.has("content") && message.get("content").isJsonArray()) {
+                for (JsonElement blockEl : message.getAsJsonArray("content")) {
+                    JsonObject block = blockEl.isJsonObject() ? blockEl.getAsJsonObject() : null;
+                    if (block == null) continue;
+                    if (!block.has("type") || !"text".equals(block.get("type").getAsString())) continue;
+                    if (block.has("text")) {
+                        if (!text.isEmpty()) text.append('\n');
+                        text.append(block.get("text").getAsString());
+                    }
+                }
+            }
+        }
+        long uncached = 0;
+        long cacheRead = 0;
+        long output = 0;
+        if (data.has("usage") && data.get("usage").isJsonObject()) {
+            JsonObject usage = data.getAsJsonObject("usage");
+            uncached = usage.has("inputTokens") ? usage.get("inputTokens").getAsLong() : 0;
+            cacheRead = usage.has("cacheReadTokens") ? usage.get("cacheReadTokens").getAsLong() : 0;
+            output = usage.has("outputTokens") ? usage.get("outputTokens").getAsLong() : 0;
+        }
+        String finalText = text.toString();
+        long finalUncached = uncached;
+        long finalCacheRead = cacheRead;
+        long finalOutput = output;
+        ApplicationManager.getApplication().invokeLater(() -> {
+            Listener l = uiListener;
+            if (l != null) l.onAssistantMessage(sessionId, finalText, finalUncached, finalCacheRead, finalOutput);
+        });
     }
 
     private void handleChunk(@NotNull String sessionId, @NotNull JsonObject data) {
@@ -390,6 +548,23 @@ public final class DshProjectService implements DshServerManager.SessionListener
         ApplicationManager.getApplication().invokeLater(() -> {
             Listener l = uiListener;
             if (l != null) l.onQueueChanged(sessionId, queued, steering);
+        });
+    }
+
+    @Override
+    public void onTokenUsage(@NotNull String sessionId, long uncachedInput, long cacheRead,
+                             long cacheWrite, long output) {
+        ApplicationManager.getApplication().invokeLater(() -> {
+            Listener l = uiListener;
+            if (l != null) l.onTokenUsage(sessionId, uncachedInput, cacheRead, cacheWrite, output);
+        });
+    }
+
+    @Override
+    public void onTitleChanged(@NotNull String sessionId, @NotNull String title) {
+        ApplicationManager.getApplication().invokeLater(() -> {
+            Listener l = uiListener;
+            if (l != null) l.onTitleChanged(sessionId, title);
         });
     }
 

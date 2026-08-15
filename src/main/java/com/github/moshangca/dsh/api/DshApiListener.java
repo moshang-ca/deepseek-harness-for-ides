@@ -74,6 +74,28 @@ public interface DshApiListener {
     void onQueueChanged(@NotNull String sessionId, int queued, int steering);
 
     /**
+     * The session's cumulative token usage changed ({@code tokenUsage}
+     * projection). Buckets are disjoint; the total is the sum of all four.
+     *
+     * @param sessionId     the session
+     * @param uncachedInput tokens that missed the provider cache
+     * @param cacheRead     tokens served from the provider cache (cache hits)
+     * @param cacheWrite    tokens written into the cache
+     * @param output        generated tokens
+     */
+    void onTokenUsage(@NotNull String sessionId, long uncachedInput, long cacheRead,
+                      long cacheWrite, long output);
+
+    /**
+     * The session title changed (auto-generated after the first prompt, or
+     * set by the user).
+     *
+     * @param sessionId the session
+     * @param title     the new title (may be empty)
+     */
+    void onTitleChanged(@NotNull String sessionId, @NotNull String title);
+
+    /**
      * The mux stream was closed or the connection failed.
      */
     void onDisconnected();

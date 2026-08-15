@@ -8,7 +8,7 @@ package com.github.moshangca.dsh.dsh;
  * the {@code web} profile. All tuning goes through environment variables that
  * the web profile reads at boot:</p>
  * <ul>
- *   <li>{@code DSH_PERMISSION_MODE} — sandbox mode (workspace-write / danger-full-access)</li>
+ *   <li>{@code DSH_PERMISSION_MODE} — sandbox mode (read-only / workspace-write / danger-full-access)</li>
  *   <li>{@code DEEPSEEK_API_KEY} — the LLM credential</li>
  * </ul>
  */
@@ -24,9 +24,17 @@ public final class DshConfig {
 
     public static final String DEFAULT_MODEL = "deepseek-v4-pro";
 
+    public static final String SANDBOX_MODE_READ_ONLY = "read-only";
+
     public static final String SANDBOX_MODE_WORKSPACE = "workspace-write";
 
     public static final String SANDBOX_MODE_FULL = "danger-full-access";
+
+    public static final String[] SANDBOX_MODES = {
+            SANDBOX_MODE_READ_ONLY,
+            SANDBOX_MODE_WORKSPACE,
+            SANDBOX_MODE_FULL,
+    };
 
     public static final String DSH_PERMISSION_MODE_ENV = "DSH_PERMISSION_MODE";
 
