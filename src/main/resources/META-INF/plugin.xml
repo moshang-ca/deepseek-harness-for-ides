@@ -1,10 +1,11 @@
 <!-- Plugin Configuration File. Read more: https://plugins.jetbrains.com/docs/intellij/plugin-configuration-file.html -->
 <idea-plugin>
     <id>com.github.moshangca.dsh</id>
-    <name>Deepseek Harness For IDE</name>
+    <name>Deepseek Harness for IDEs</name>
     <vendor>moshang-ca</vendor>
+    <icon>/icons/pluginIcon.svg</icon>
     <description><![CDATA[
-        <p><b>Deepseek Harness For IDE</b> integrates <a href="https://github.com/deepseek-ai/deepseek-harness">DeepSeek Harness</a> (dsh) into the IDE as a chat tool window. It runs the dsh web-profile server locally and speaks its HTTP API (unary RPC + a mux event stream).</p>
+        <p><b>Deepseek Harness For IDEs</b> integrates <a href="https://github.com/deepseek-ai/deepseek-harness">DeepSeek Harness</a> (dsh) into the IDE as a chat tool window. It runs the dsh web-profile server locally and speaks its HTTP API (unary RPC + a mux event stream).</p>
         <p>The tool window streams assistant replies with collapsible reasoning, renders tool-call cards and approval prompts, answers interactive questions, and lets you switch models and sandbox mode without leaving the IDE.</p>
     ]]></description>
 

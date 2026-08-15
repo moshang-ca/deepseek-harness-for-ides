@@ -1,6 +1,6 @@
 import org.jetbrains.intellij.platform.gradle.extensions.intellijPlatform
 
-rootProject.name = "deepseek-harness-for-intellij"
+rootProject.name = "deepseek-harness-for-ides"
 
 pluginManagement {
     plugins {

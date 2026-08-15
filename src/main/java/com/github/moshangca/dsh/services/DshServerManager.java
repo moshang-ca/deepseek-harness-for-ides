@@ -112,8 +112,9 @@ public final class DshServerManager implements DshApiListener {
     }
 
     /**
-     * Bring the shared server up if needed and return the client. Runs the
-     * startup modal on the calling (EDT) thread.
+     * Bring the shared server up if needed and return the client.
+     * The startup runs in the background; the returned future
+     * completes when it is ready, without blocking the UI.
      */
     public @NotNull CompletableFuture<DshApiClient> ensureStarted(@Nullable Project project) {
         DshApiClient existing = clientRef.get();
@@ -133,28 +134,29 @@ public final class DshServerManager implements DshApiListener {
 
     private CompletableFuture<DshApiClient> doStart(@Nullable Project project) {
         DshSettingsState settings = DshSettingsState.getInstance();
-        AtomicReference<DshApiClient> result = new AtomicReference<>();
-        AtomicReference<Throwable> failure = new AtomicReference<>();
-        ProgressManager.getInstance().run(new Task.Modal(project, "Starting DeepSeek Harness", true) {
+        CompletableFuture<DshApiClient> result = new CompletableFuture<>();
+        result.whenComplete((client, error) -> {
+            synchronized (this) {
+                pendingStart = null;
+            }
+        });
+        ProgressManager.getInstance().run(new Task.Backgroundable(project, "Starting DeepSeek Harness", true) {
             @Override
             public void run(@NotNull ProgressIndicator indicator) {
                 indicator.setIndeterminate(true);
                 try {
-                    result.set(startServer(settings, indicator));
+                    result.complete(startServer(settings, indicator));
                 } catch (Throwable t) {
                     if (indicator.isCanceled()) {
                         processManager.stop();
-                        failure.set(new ProcessCanceledException());
+                        result.completeExceptionally(new ProcessCanceledException());
                     } else {
-                        failure.set(t);
+                        result.completeExceptionally(t);
                     }
                 }
             }
         });
-        pendingStart = null;
-        Throwable t = failure.get();
-        if (t != null) return CompletableFuture.failedFuture(t);
-        return CompletableFuture.completedFuture(result.get());
+        return result;
     }
 
     private @NotNull DshApiClient startServer(@NotNull DshSettingsState settings, @NotNull ProgressIndicator indicator) {

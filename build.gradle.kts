@@ -16,6 +16,23 @@ tasks.withType<JavaCompile>().configureEach {
     options.encoding = "UTF-8"
 }
 
+intellijPlatform {
+    pluginVerification {
+        ides {
+            recommended()
+        }
+    }
+    signing {
+        certificateChain = providers.gradleProperty("intellijPlatform.signing.certificateChain")
+        privateKey = providers.gradleProperty("intellijPlatform.signing.privateKey")
+        password = providers.gradleProperty("intellijPlatform.signing.password")
+    }
+    publishing {
+        token = providers.gradleProperty("intellijPlatform.publishing.token")
+        channels = listOf("default")
+    }
+}
+
 dependencies {
     testImplementation("junit:junit:4.13.2")
 

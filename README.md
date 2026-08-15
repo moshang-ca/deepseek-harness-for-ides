@@ -1,8 +1,8 @@
 # deepseek-harness-for-jetbrain-ides
 
 ![Build](https://github.com/moshang-ca/deepseek-harness-for-intellij/workflows/Build/badge.svg)
-[![Version](https://img.shields.io/jetbrains/plugin/v/MARKETPLACE_ID.svg)](https://plugins.jetbrains.com/plugin/MARKETPLACE_ID)
-[![Downloads](https://img.shields.io/jetbrains/plugin/d/MARKETPLACE_ID.svg)](https://plugins.jetbrains.com/plugin/MARKETPLACE_ID)
+[![Version](https://img.shields.io/jetbrains/plugin/v/com.github.moshangca.dsh.svg)](https://plugins.jetbrains.com/plugin/com.github.moshangca.dsh)
+[![Downloads](https://img.shields.io/jetbrains/plugin/d/com.github.moshangca.dsh.svg)](https://plugins.jetbrains.com/plugin/com.github.moshangca.dsh)
 [![License: GPL v3](https://img.shields.io/badge/License-GPLv3-blue.svg)](https://www.gnu.org/licenses/gpl-3.0)
 
 An IntelliJ Platform plugin that integrates [DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness) (dsh) into the IDE as a chat tool window. It launches a local dsh **web-profile** server and talks to its HTTP API.

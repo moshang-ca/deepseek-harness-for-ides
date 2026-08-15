@@ -301,6 +301,26 @@ public final class DshProjectService implements DshServerManager.SessionListener
         fetchHistory(newSessionId, null);
     }
 
+    /**
+     * Rename a session ({@code session.rename}) and refresh the history list.
+     */
+    public void renameSession(@NotNull String sessionId, @NotNull String title) {
+        serverManager.ensureStarted(project).thenCompose(client -> {
+            clientRef.set(client);
+            return client.renameSession(sessionId, title);
+        }).whenComplete((result, error) -> {
+            if (error != null) {
+                LOG.warn("session rename failed", error);
+                ApplicationManager.getApplication().invokeLater(() -> {
+                    Listener l = uiListener;
+                    if (l != null) l.onStatusChanged("rename failed: " + error.getMessage());
+                });
+                return;
+            }
+            refreshSessionList();
+        });
+    }
+
     private void prompt(@NotNull String sessionId, @NotNull String text) {
         DshApiClient client = clientRef.get();
         if (client == null) {

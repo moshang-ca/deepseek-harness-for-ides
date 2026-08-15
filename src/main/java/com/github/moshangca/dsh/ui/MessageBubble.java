@@ -2,7 +2,10 @@ package com.github.moshangca.dsh.ui;
 
 import com.google.gson.GsonBuilder;
 import com.google.gson.JsonParser;
+import com.intellij.markdown.utils.doc.DocMarkdownToHtmlConverter;
+import com.intellij.openapi.project.Project;
 import com.intellij.ui.JBColor;
+import com.intellij.ui.components.JBHtmlPane;
 import com.intellij.ui.components.JBLabel;
 import com.intellij.ui.components.JBScrollPane;
 import com.intellij.util.ui.JBUI;
@@ -11,6 +14,9 @@ import org.jetbrains.annotations.Nullable;
 
 import javax.swing.*;
 import java.awt.*;
+import java.awt.datatransfer.StringSelection;
+import java.awt.event.MouseAdapter;
+import java.awt.event.MouseEvent;
 
 /**
  * Renders one {@link ChatMessage} as an AI-Assistant-style bubble.
@@ -23,6 +29,7 @@ import java.awt.*;
  *   <li>STATUS — thin gray line</li>
  * </ul>
  */
+@SuppressWarnings("UnstableApiUsage")
 public final class MessageBubble extends JPanel {
 
     private static final Color ERROR_COLOR = new JBColor(0xB4483C, 0xC0564B);
@@ -30,14 +37,17 @@ public final class MessageBubble extends JPanel {
     private static final Color USER_BACKGROUND = new JBColor(0x2E6BB5, 0x3B6EA5);
     private static final Color MUTED_TEXT = UIManager.getColor("Label.disabledForeground");
 
+    private final @Nullable Project project;
     private final ChatMessage message;
     private final @NotNull Runnable onAllow;
     private final @NotNull Runnable onDeny;
     private final @NotNull Runnable onToggleCollapse;
 
-    public MessageBubble(@NotNull ChatMessage message, @NotNull Runnable onAllow, @NotNull Runnable onDeny,
+    public MessageBubble(@Nullable Project project, @NotNull ChatMessage message,
+                         @NotNull Runnable onAllow, @NotNull Runnable onDeny,
                          @NotNull Runnable onToggleCollapse) {
         super(new BorderLayout());
+        this.project = project;
         this.message = message;
         this.onAllow = onAllow;
         this.onDeny = onDeny;
@@ -68,8 +78,9 @@ public final class MessageBubble extends JPanel {
     private JComponent buildUser() {
         RoundedPanel bubble = new RoundedPanel(new BorderLayout(), USER_BACKGROUND);
         bubble.setBorder(JBUI.Borders.empty(8, 12));
-        JBLabel label = wrapText(message.getText(), JBColor.WHITE);
-        bubble.add(label, BorderLayout.CENTER);
+        @SuppressWarnings("UseJBColor")
+        JBHtmlPane pane = markdownPane(project, message.getText(), Color.WHITE);
+        bubble.add(pane, BorderLayout.CENTER);
         return bubble;
     }
 
@@ -80,11 +91,10 @@ public final class MessageBubble extends JPanel {
         panel.setBorder(JBUI.Borders.empty(2));
         panel.setAlignmentX(Component.LEFT_ALIGNMENT);
 
-        JBLabel label = wrapText(message.getText());
-        label.setBorder(JBUI.Borders.empty(4, 2));
-        label.setAlignmentX(Component.LEFT_ALIGNMENT);
-        label.setMaximumSize(new Dimension(Integer.MAX_VALUE, Integer.MAX_VALUE));
-        panel.add(label);
+        JBHtmlPane text = markdownPane(project, message.getText(), null);
+        text.setBorder(JBUI.Borders.empty(4, 2));
+        text.setAlignmentX(Component.LEFT_ALIGNMENT);
+        panel.add(text);
 
         // Per-message token detail: uncached input, output, cache hits + ratio.
         long uncached = message.getUncachedInputTokens();
@@ -140,12 +150,11 @@ public final class MessageBubble extends JPanel {
         panel.add(header);
 
         if (!message.isCollapsed()) {
-            JBLabel content = wrapText(message.getText());
+            JTextPane content = selectableText(message.getText());
             content.setForeground(MUTED_TEXT);
             content.setFont(content.getFont().deriveFont(Font.ITALIC, content.getFont().getSize() - 1));
             content.setBorder(JBUI.Borders.empty(0, 6, 2, 0));
             content.setAlignmentX(Component.LEFT_ALIGNMENT);
-            content.setMaximumSize(new Dimension(Integer.MAX_VALUE, Integer.MAX_VALUE));
             panel.add(content);
         }
         return panel;
@@ -310,17 +319,40 @@ public final class MessageBubble extends JPanel {
                 .replace("\n", "<br>");
     }
 
-    /** A label that wraps its HTML text to the available width. */
-    private static JBLabel wrapText(String text) {
-        return wrapText(text, null);
+
+    /**
+     * Render markdown body text as an HTML pane (selectable, wraps to width).
+     * An explicit color is applied by wrapping the converted HTML in a styled
+     * div (the converter output has no color, so plain setForeground applies).
+     */
+    private static JBHtmlPane markdownPane(@Nullable Project project, @NotNull String markdown,
+                                           @Nullable Color color) {
+        String html = DocMarkdownToHtmlConverter.convert(project, markdown);
+        if (color != null) {
+            html = "<div style='color:" + toHex(color) + "'>" + html + "</div>";
+        }
+        JBHtmlPane pane = new JBHtmlPane();
+        pane.setText(html);
+        pane.setEditable(false);
+        pane.setOpaque(false);
+        pane.setMaximumSize(new Dimension(Integer.MAX_VALUE, Integer.MAX_VALUE));
+        return pane;
     }
 
-    private static JBLabel wrapText(String text, @Nullable Color color) {
-        String body = color != null
-                ? "<font color=\"" + toHex(color) + "\">" + escapeHtml(text) + "</font>"
-                : escapeHtml(text);
-        JBLabel label = new JBLabel("<html>" + body + "</html>");
-        label.setOpaque(false);
-        return label;
+    private static JTextPane selectableText(String text) {
+        return selectableText(text, null);
+    }
+
+    /** A non-editable, wrapping text pane whose content can be selected/copied. */
+    private static JTextPane selectableText(String text, @Nullable Color color) {
+        JTextPane pane = new JTextPane();
+        pane.setEditable(false);
+        pane.setOpaque(false);
+        pane.setFont(UIManager.getFont("Label.font"));
+        pane.setBorder(JBUI.Borders.empty());
+        pane.setMaximumSize(new Dimension(Integer.MAX_VALUE, Integer.MAX_VALUE));
+        pane.setForeground(color != null ? color : UIManager.getColor("Label.foreground"));
+        pane.setText(text);
+        return pane;
     }
 }

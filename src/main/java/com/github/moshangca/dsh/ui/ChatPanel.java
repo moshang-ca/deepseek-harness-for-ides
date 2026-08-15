@@ -10,6 +10,7 @@ import com.intellij.icons.AllIcons;
 import com.intellij.openapi.application.ApplicationManager;
 import com.intellij.openapi.project.Project;
 import com.intellij.openapi.ui.ComboBox;
+import com.intellij.openapi.ui.Messages;
 import com.intellij.openapi.util.IconLoader;
 import com.intellij.ui.JBColor;
 import com.intellij.ui.components.JBScrollPane;
@@ -22,6 +23,8 @@ import javax.swing.*;
 import java.awt.*;
 import java.awt.event.FocusAdapter;
 import java.awt.event.FocusEvent;
+import java.awt.event.MouseAdapter;
+import java.awt.event.MouseEvent;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Objects;
@@ -32,9 +35,10 @@ public final class ChatPanel extends JPanel implements DshProjectService.Listene
     private static final Color STATUS_RED = new JBColor(0xB4483C, 0xC0564B);
     private static final Color STATUS_MUTED = new JBColor(0x8A8A8A, 0x8A8A8A);
     private static final Color INPUT_BORDER_NORMAL = new JBColor(0xD5D5D5, 0x4E5054);
-    private static final Color INPUT_BORDER_FOCUS = JBColor.namedColor("Focus.color", new JBColor(0x40B6FF, 0x40B6FF));
+    // A fixed blue JBColor pair, not the theme's "Focus.color" (which is red in
+    // some themes).
+    private static final Color INPUT_BORDER_FOCUS = new JBColor(0x40B6FF, 0x40B6FF);
     private static final String PLACEHOLDER = "Type a message and press Enter...";
-    /** Red square shown on the send button while a turn runs; clicking cancels it. */
     private static final Icon CANCEL_ICON = IconLoader.getIcon("/icons/cancel.svg", ChatPanel.class);
 
     private final Project project;
@@ -65,6 +69,8 @@ public final class ChatPanel extends JPanel implements DshProjectService.Listene
     private boolean turnActive;
     /** Current session id (may differ from service's if a history switch is pending). */
     private volatile @Nullable String activeSessionId;
+    /** True while the history dropdown is being repopulated (suppress selection side effects). */
+    private boolean historyRefreshing;
 
     private @Nullable ChatMessage streamingAssistant;
     private @Nullable ChatMessage streamingReasoning;
@@ -221,6 +227,28 @@ public final class ChatPanel extends JPanel implements DshProjectService.Listene
             }
         });
         historyBox.addActionListener(e -> onHistorySelected());
+
+        JPopupMenu historyMenu = new JPopupMenu();
+        JMenuItem renameItem = new JMenuItem("Rename...");
+        renameItem.addActionListener(e -> renameCurrentSession());
+        historyMenu.add(renameItem);
+        historyBox.addMouseListener(new MouseAdapter() {
+            @Override
+            public void mousePressed(MouseEvent e) {
+                maybeShowPopup(e);
+            }
+
+            @Override
+            public void mouseReleased(MouseEvent e) {
+                maybeShowPopup(e);
+            }
+
+            private void maybeShowPopup(MouseEvent e) {
+                if (e.isPopupTrigger()) {
+                    historyMenu.show(e.getComponent(), e.getX(), e.getY());
+                }
+            }
+        });
         JPanel statusRight = new JPanel(new FlowLayout(FlowLayout.RIGHT, 2, 0));
         statusRight.setOpaque(false);
         statusRight.add(newSessionButton);
@@ -405,6 +433,7 @@ public final class ChatPanel extends JPanel implements DshProjectService.Listene
 
     /** History dropdown selection: switch to that session (reload transcript). */
     private void onHistorySelected() {
+        if (historyRefreshing) return;
         Object selected = historyBox.getSelectedItem();
         if (!(selected instanceof SessionEntry entry)) return;
         if (entry.sessionId.equals(activeSessionId)) return;
@@ -416,18 +445,48 @@ public final class ChatPanel extends JPanel implements DshProjectService.Listene
         service.switchSession(entry.sessionId);
     }
 
+    /** Right-click on the history dropdown: rename the selected session. */
+    private void renameCurrentSession() {
+        Object selected = historyBox.getSelectedItem();
+        if (!(selected instanceof SessionEntry(String sessionId, String currentTitle))) return;
+        String newTitle = Messages.showInputDialog(
+                project, "Session title:", "Rename Session", null, currentTitle, null);
+        if (newTitle == null || newTitle.trim().isEmpty() || newTitle.equals(currentTitle)) return;
+        service.renameSession(sessionId, newTitle.trim());
+        setStatus("renamed session");
+    }
+
     private void populateSessionList(@NotNull JsonObject list) {
-        historyBox.removeAllItems();
-        if (!list.has("items") || !list.get("items").isJsonArray()) return;
-        for (JsonElement itemEl : list.getAsJsonArray("items")) {
-            JsonObject item = itemEl.isJsonObject() ? itemEl.getAsJsonObject() : null;
-            if (item == null) continue;
-            // Skip blank (conversation-not-started) sessions per dsh docs.
-            if (item.has("blank") && item.get("blank").getAsBoolean()) continue;
-            String sessionId = item.has("sessionId") ? item.get("sessionId").getAsString() : "";
-            if (sessionId.isEmpty()) continue;
-            String title = extractTitle(item);
-            historyBox.addItem(new SessionEntry(sessionId, title));
+        historyRefreshing = true;
+        try {
+            historyBox.removeAllItems();
+            if (!list.has("items") || !list.get("items").isJsonArray()) return;
+            for (JsonElement itemEl : list.getAsJsonArray("items")) {
+                JsonObject item = itemEl.isJsonObject() ? itemEl.getAsJsonObject() : null;
+                if (item == null) continue;
+                // Skip blank (conversation-not-started) sessions per dsh docs.
+                if (item.has("blank") && item.get("blank").getAsBoolean()) continue;
+                String sessionId = item.has("sessionId") ? item.get("sessionId").getAsString() : "";
+                if (sessionId.isEmpty()) continue;
+                String title = extractTitle(item);
+                historyBox.addItem(new SessionEntry(sessionId, title));
+            }
+            // Restore the active session as the combo selection after the rebuild.
+            // If the active session is not in the list (e.g. a fresh blank session),
+            // clear the selection instead of letting the auto-selected first item
+            // imply a switch to another session.
+            if (activeSessionId != null) {
+                for (int i = 0; i < historyBox.getItemCount(); i++) {
+                    SessionEntry e = historyBox.getItemAt(i);
+                    if (activeSessionId.equals(e.sessionId())) {
+                        historyBox.setSelectedItem(e);
+                        return;
+                    }
+                }
+                historyBox.setSelectedIndex(-1);
+            }
+        } finally {
+            historyRefreshing = false;
         }
     }
 
@@ -527,7 +586,7 @@ public final class ChatPanel extends JPanel implements DshProjectService.Listene
     }
 
     private MessageBubble createBubble(@NotNull ChatMessage message) {
-        return new MessageBubble(message, () -> onAllow(message), () -> onDeny(message), () -> {
+        return new MessageBubble(project, message, () -> onAllow(message), () -> onDeny(message), () -> {
             message.setCollapsed(!message.isCollapsed());
             updateMessage(message, false);
         });
@@ -731,6 +790,15 @@ public final class ChatPanel extends JPanel implements DshProjectService.Listene
                     ? event.getAsJsonObject("data") : new JsonObject();
             switch (type) {
                 case "user/message" -> {
+                    // Skip system-prompt snapshots (runtime context, file/approval
+                    // policy, ...) that dsh injects as "user" messages — they are
+                    // not user input. Genuine input carries source.kind == "user".
+                    if (data.has("source") && data.get("source").isJsonObject()) {
+                        JsonObject source = data.getAsJsonObject("source");
+                        if (source.has("kind") && !"user".equals(source.get("kind").getAsString())) {
+                            break;
+                        }
+                    }
                     String text = extractTextContent(data.get("content"));
                     if (!text.isEmpty()) addMessage(ChatMessage.user(activeSessionId, text));
                 }

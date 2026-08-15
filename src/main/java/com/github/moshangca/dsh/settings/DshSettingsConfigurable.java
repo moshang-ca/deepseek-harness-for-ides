@@ -28,14 +28,15 @@ public final class DshSettingsConfigurable implements Configurable {
     public @Nullable JComponent createComponent() {
         JPanel panel = new JPanel(new GridBagLayout());
         GridBagConstraints c = new GridBagConstraints();
-        c.insets = JBUI.insets(4, 8, 4, 8);
-        c.anchor = GridBagConstraints.WEST;
+        c.insets = JBUI.insets(4, 8);
+        c.fill = GridBagConstraints.HORIZONTAL;
 
         providerField = new JTextField(state.provider, 20);
         apiKeyField = new JPasswordField(state.apiKey, 20);
         portField = new JTextField(String.valueOf(state.port), 6);
 
         int row = 0;
+        // 添加标签-输入框行
         addRow(panel, c, row++, DshBundle.message("settings.provider.label"), providerField);
         addRow(panel, c, row++, DshBundle.message("settings.apiKey.label"), apiKeyField);
         addRow(panel, c, row++, DshBundle.message("settings.port.label"), portField);

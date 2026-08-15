@@ -2,23 +2,22 @@
 
 # deepseek-harness-for-intellij Changelog
 
-## [Unreleased]
+## [0.0.2] - 2026-08-16
 
 ### Added
-- Session history dropdown: switch between past sessions from the server.
-- Per-message token usage display (uncached input / output / cache read with hit ratio) in assistant bubbles.
-- Reasoning effort selector for models that support it (e.g. high / max).
-- Cancel button (red square) on the send button to interrupt an active turn.
-- `read-only` sandbox mode as the new default (safest; workspace-write / danger-full-access are opt-in).
-- Session title auto-updates and appears in the history dropdown.
-- Cumulative token usage shown in the status bar (`tokens: X.Xk`).
-- Session list refresh on new session creation and title changes.
+- Right-click on the session history dropdown to rename the current session.
+- Markdown rendering for assistant messages (code blocks, lists, etc.).
+- Plugin icon.
+- Session rename API integration (`session.rename`).
 
 ### Changed
-- Sandbox mode selection now persists and restarts the server immediately.
-- Improved layout: model selector and effort dropdown share the input row.
-- Windows no longer defaults to `danger-full-access`; `read-only` is the safe default.
+- Server startup now runs as a background task (no longer blocks the UI).
+- Input focus border uses a fixed blue color instead of the theme's "Focus.color"
+  (which is red in some dark themes).
+- History dropdown refresh preserves the active session selection.
+- History rebuild skips system-prompt snapshots (runtime context injected by dsh).
 
-### TODO
-- [x] Add token consumption visualization for each conversation turn.
-- [ ] Improve UI/UX polish: refine message bubbles, input area, and overall visual consistency.
+### Fixed
+- Assistant message text no longer truncated to a single line.
+- Approval cards are removed from the transcript once resolved.
+- Reasoning text now selectable/copyable.
